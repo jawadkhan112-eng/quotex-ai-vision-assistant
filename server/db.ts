@@ -2,9 +2,15 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 
-const DB_DIR = path.resolve(process.cwd(), 'data');
+const isVercel = Boolean(process.env.VERCEL);
+const DB_DIR = isVercel ? '/tmp' : path.resolve(process.cwd(), 'data');
+
 if (!fs.existsSync(DB_DIR)) {
-  fs.mkdirSync(DB_DIR, { recursive: true });
+  try {
+    fs.mkdirSync(DB_DIR, { recursive: true });
+  } catch (e) {
+    console.warn('Could not create DB_DIR, falling back to /tmp:', e);
+  }
 }
 
 const DB_PATH = path.join(DB_DIR, 'quotex_vision.db');

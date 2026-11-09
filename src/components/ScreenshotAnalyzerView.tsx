@@ -1,5 +1,5 @@
-import React, { useState, useRef } from 'react';
-import { Upload, Camera, Zap, AlertTriangle, CheckCircle2, ShieldAlert, FileImage, RefreshCw } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { Upload, Camera, Zap, AlertTriangle, CheckCircle2, ShieldAlert, FileImage, RefreshCw, Clipboard, Crop } from 'lucide-react';
 import { SignalData } from '../types';
 
 interface ScreenshotAnalyzerViewProps {
@@ -16,40 +16,83 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
   geminiConnected,
 }) => {
   const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [cropActive, setCropActive] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [signalResult, setSignalResult] = useState<SignalData | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageRef = useRef<HTMLImageElement>(null);
+
+  // Helper to load image file into preview
+  const loadImageFile = (file: File) => {
+    if (!file.type.startsWith('image/')) {
+      setErrorMessage('Please upload or paste a valid image file (PNG, JPG, WEBP).');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      setImagePreview(event.target?.result as string);
+      setErrorMessage(null);
+      setSignalResult(null);
+    };
+    reader.readAsDataURL(file);
+  };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      if (!file.type.startsWith('image/')) {
-        setErrorMessage('Please upload a valid image file (PNG, JPG, WEBP).');
-        return;
-      }
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        setImagePreview(event.target?.result as string);
-        setErrorMessage(null);
-        setSignalResult(null);
-      };
-      reader.readAsDataURL(file);
-    }
+    if (file) loadImageFile(file);
   };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     const file = e.dataTransfer.files?.[0];
-    if (file && file.type.startsWith('image/')) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        setImagePreview(event.target?.result as string);
-        setErrorMessage(null);
-        setSignalResult(null);
-      };
-      reader.readAsDataURL(file);
+    if (file) loadImageFile(file);
+  };
+
+  // Global Ctrl+V Paste Event Listener
+  useEffect(() => {
+    const handleGlobalPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.startsWith('image/')) {
+          const file = items[i].getAsFile();
+          if (file) {
+            loadImageFile(file);
+            e.preventDefault();
+            break;
+          }
+        }
+      }
+    };
+
+    window.addEventListener('paste', handleGlobalPaste);
+    return () => window.removeEventListener('paste', handleGlobalPaste);
+  }, []);
+
+  // Dedicated "Paste Screenshot" Button handler using Clipboard API
+  const handlePasteButtonClick = async () => {
+    setErrorMessage(null);
+    try {
+      if (navigator.clipboard && navigator.clipboard.read) {
+        const clipboardItems = await navigator.clipboard.read();
+        for (const item of clipboardItems) {
+          const imageType = item.types.find((t) => t.startsWith('image/'));
+          if (imageType) {
+            const blob = await item.getType(imageType);
+            const file = new File([blob], 'clipboard_screenshot.png', { type: imageType });
+            loadImageFile(file);
+            return;
+          }
+        }
+        setErrorMessage('No image found on clipboard. Copy a chart screenshot first (Ctrl+C or Win+Shift+S) and click Paste.');
+      } else {
+        setErrorMessage('Direct clipboard button access is restricted by browser. Please press Ctrl+V to paste your screenshot.');
+      }
+    } catch (err: any) {
+      setErrorMessage('Clipboard permission denied or no image on clipboard. Please press Ctrl+V directly to paste.');
     }
   };
 
@@ -87,18 +130,24 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto">
       {/* Header Title */}
-      <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+      <div className="flex flex-wrap items-center justify-between border-b border-slate-800 pb-4 gap-4">
         <div>
           <h2 className="text-xl font-bold text-slate-100 flex items-center gap-2">
             <Camera className="w-5 h-5 text-cyan-400" /> Screenshot Vision Analyzer
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Upload or paste Quotex chart screenshots to evaluate price action, wicks, trend, and indicators.
+            Paste with <kbd className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 font-mono text-cyan-300">Ctrl+V</kbd>, drag & drop, or click to upload your Quotex chart.
           </p>
         </div>
 
-        <div className="flex items-center gap-2 text-xs text-slate-400">
-          <span>Active Asset: <strong className="text-slate-200 font-mono">{selectedSymbol}</strong> ({selectedTimeframe})</span>
+        {/* Action Buttons Header */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handlePasteButtonClick}
+            className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-colors"
+          >
+            <Clipboard className="w-3.5 h-3.5 text-cyan-400" /> Paste Screenshot (Ctrl+V)
+          </button>
         </div>
       </div>
 
@@ -126,9 +175,9 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
               </div>
               <div className="space-y-1">
                 <p className="text-sm font-semibold text-slate-200">
-                  Click to upload or drag & drop screenshot
+                  Click to upload, drop image, or press <span className="text-cyan-400 font-mono">Ctrl+V</span>
                 </p>
-                <p className="text-xs text-slate-500">Supports PNG, JPG, WEBP (Quotex 1M/5M charts)</p>
+                <p className="text-xs text-slate-500">Supports PNG, JPG, WEBP Quotex 1M/5M screenshots</p>
               </div>
               <input
                 ref={fileInputRef}
@@ -142,6 +191,7 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
             <div className="rounded-xl bg-slate-900 border border-slate-800 p-3 space-y-3">
               <div className="relative rounded-lg overflow-hidden border border-slate-800 bg-slate-950 max-h-96 flex items-center justify-center">
                 <img
+                  ref={imageRef}
                   src={imagePreview}
                   alt="Chart Screenshot"
                   className="max-h-96 object-contain w-full"
@@ -165,7 +215,7 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
                     </>
                   ) : (
                     <>
-                      <Zap className="w-4 h-4" /> Run AI Vision Analysis
+                      <Zap className="w-4 h-4" /> One-Click AI Vision Analysis
                     </>
                   )}
                 </button>
@@ -186,7 +236,7 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
           {!geminiConnected && (
             <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center gap-2">
               <ShieldAlert className="w-4 h-4 shrink-0" />
-              <span>Gemini API key is not configured. Configure key in AI Provider Settings.</span>
+              <span>Gemini API key is not configured. Add GEMINI_API_KEY in AI Provider Settings or Vercel Environment.</span>
             </div>
           )}
         </div>
@@ -283,7 +333,7 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
               <FileImage className="w-8 h-8 mx-auto text-slate-600" />
               <p className="text-sm font-medium">No Analysis Result Yet</p>
               <p className="text-xs max-w-sm mx-auto">
-                Select or drag a screenshot on the left and click "Run AI Vision Analysis" to inspect signal evidence.
+                Paste a screenshot using <kbd className="text-cyan-400">Ctrl+V</kbd> or click "Paste Screenshot" to automatically load and analyze your chart.
               </p>
             </div>
           )}
