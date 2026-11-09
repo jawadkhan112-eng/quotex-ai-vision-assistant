@@ -1,19 +1,15 @@
-import { OHLC, analyzeTechnicalIndicators, TechnicalIndicatorResults } from './indicators';
+import { OHLC, analyzeTechnicalIndicators } from './indicators';
 import { detectCandlestickPatterns, CandlestickPatternMatch } from './candlesticks';
 import { VisionAnalysisResult } from './geminiVision';
+import { getActiveAiConfig } from './apiKeyManager';
 
 export interface FinalSignalResult {
   signal: 'CALL' | 'PUT' | 'WAIT';
-  evidenceQualityScore: number; // 0 - 100
+  evidenceQualityScore: number;
   summaryReason: string;
   supportingEvidence: string[];
   opposingEvidence: string[];
-  indicatorConsensus: {
-    bullishCount: number;
-    bearishCount: number;
-    neutralCount: number;
-    trendBias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
-  };
+  indicatorConsensus: { bullishCount: number; bearishCount: number; neutralCount: number; trendBias: 'BULLISH' | 'BEARISH' | 'NEUTRAL' };
   candlestickMatches: CandlestickPatternMatch[];
   visionInsights?: VisionAnalysisResult;
   invalidationLevel?: number;
@@ -21,193 +17,96 @@ export interface FinalSignalResult {
   disclaimer: string;
 }
 
+/**
+ * Fuses only supplied candle data and actual AI vision output. The evidence threshold
+ * defaults to the saved user setting; callers such as backtests may provide a fixed
+ * threshold explicitly to keep a historical run deterministic.
+ */
 export function generateFusedSignal(
   candles?: OHLC[],
   visionResult?: VisionAnalysisResult,
-  higherTimeframeCandles?: OHLC[]
+  higherTimeframeCandles?: OHLC[],
+  minimumEvidenceQuality?: number,
 ): FinalSignalResult {
   const supportingEvidence: string[] = [];
   const opposingEvidence: string[] = [];
-  const riskNotes: string[] = [];
-
+  const riskNotes = ['Evidence quality is not a win probability or guarantee.', 'This assistant does not execute trades.'];
+  const configuredThreshold = minimumEvidenceQuality ?? getActiveAiConfig().evidenceThreshold;
+  const threshold = Number.isFinite(configuredThreshold) ? Math.min(90, Math.max(50, configuredThreshold)) : 65;
   let bullishWeight = 0;
   let bearishWeight = 0;
-  let maxPossibleWeight = 0;
-
-  // 1. Technical Indicators Confluence
-  let techResults: TechnicalIndicatorResults | undefined;
-  let candlestickMatches: CandlestickPatternMatch[] = [];
-
-  let indicatorConsensus = {
-    bullishCount: 0,
-    bearishCount: 0,
-    neutralCount: 0,
-    trendBias: 'NEUTRAL' as 'BULLISH' | 'BEARISH' | 'NEUTRAL',
-  };
+  let maximumWeight = 0;
+  const consensus = { bullishCount: 0, bearishCount: 0, neutralCount: 0, trendBias: 'NEUTRAL' as 'BULLISH' | 'BEARISH' | 'NEUTRAL' };
+  let patterns: CandlestickPatternMatch[] = [];
 
   if (candles && candles.length >= 14) {
-    techResults = analyzeTechnicalIndicators(candles);
-    candlestickMatches = detectCandlestickPatterns(candles);
-    const lastClose = candles[candles.length - 1].close;
-
-    // EMA Alignment
-    if (techResults.ema9 && techResults.ema21 && techResults.ema50) {
-      maxPossibleWeight += 20;
-      if (techResults.ema9 > techResults.ema21 && techResults.ema21 > techResults.ema50) {
-        bullishWeight += 20;
-        indicatorConsensus.bullishCount++;
-        supportingEvidence.push(`Bullish EMA Ribbon alignment (EMA9 > EMA21 > EMA50) at ${lastClose.toFixed(5)}`);
-      } else if (techResults.ema9 < techResults.ema21 && techResults.ema21 < techResults.ema50) {
-        bearishWeight += 20;
-        indicatorConsensus.bearishCount++;
-        supportingEvidence.push(`Bearish EMA Ribbon alignment (EMA9 < EMA21 < EMA50) at ${lastClose.toFixed(5)}`);
-      } else {
-        indicatorConsensus.neutralCount++;
-        opposingEvidence.push(`Entangled EMA lines indicate rangebound/choppy price action.`);
-      }
+    const indicators = analyzeTechnicalIndicators(candles);
+    patterns = detectCandlestickPatterns(candles);
+    if (indicators.ema9 !== undefined && indicators.ema21 !== undefined && indicators.ema50 !== undefined) {
+      maximumWeight += 20;
+      if (indicators.ema9 > indicators.ema21 && indicators.ema21 > indicators.ema50) {
+        bullishWeight += 20; consensus.bullishCount++; supportingEvidence.push('EMA 9/21/50 bullish alignment.');
+      } else if (indicators.ema9 < indicators.ema21 && indicators.ema21 < indicators.ema50) {
+        bearishWeight += 20; consensus.bearishCount++; supportingEvidence.push('EMA 9/21/50 bearish alignment.');
+      } else { consensus.neutralCount++; opposingEvidence.push('EMA averages are mixed.'); }
     }
-
-    // RSI
-    if (techResults.rsi14 !== undefined) {
-      maxPossibleWeight += 15;
-      if (techResults.rsi14 > 50 && techResults.rsi14 < 70) {
-        bullishWeight += 15;
-        indicatorConsensus.bullishCount++;
-        supportingEvidence.push(`RSI(14) is bullish in expansion zone (${techResults.rsi14.toFixed(1)})`);
-      } else if (techResults.rsi14 < 50 && techResults.rsi14 > 30) {
-        bearishWeight += 15;
-        indicatorConsensus.bearishCount++;
-        supportingEvidence.push(`RSI(14) is bearish in contraction zone (${techResults.rsi14.toFixed(1)})`);
-      } else if (techResults.rsi14 >= 70) {
-        opposingEvidence.push(`RSI(14) is overbought at ${techResults.rsi14.toFixed(1)} - exhaustion risk`);
-        indicatorConsensus.neutralCount++;
-      } else if (techResults.rsi14 <= 30) {
-        opposingEvidence.push(`RSI(14) is oversold at ${techResults.rsi14.toFixed(1)} - bounce risk`);
-        indicatorConsensus.neutralCount++;
-      }
+    if (indicators.rsi14 !== undefined) {
+      maximumWeight += 15;
+      if (indicators.rsi14 > 50 && indicators.rsi14 < 70) { bullishWeight += 15; consensus.bullishCount++; supportingEvidence.push(`RSI(14) is bullish at ${indicators.rsi14.toFixed(1)}.`); }
+      else if (indicators.rsi14 < 50 && indicators.rsi14 > 30) { bearishWeight += 15; consensus.bearishCount++; supportingEvidence.push(`RSI(14) is bearish at ${indicators.rsi14.toFixed(1)}.`); }
+      else { consensus.neutralCount++; opposingEvidence.push(`RSI(14) at ${indicators.rsi14.toFixed(1)} signals an extreme/neutral zone.`); }
     }
-
-    // MACD
-    if (techResults.macd) {
-      maxPossibleWeight += 15;
-      if (techResults.macd.histogram > 0 && techResults.macd.macdLine > techResults.macd.signalLine) {
-        bullishWeight += 15;
-        indicatorConsensus.bullishCount++;
-        supportingEvidence.push(`MACD positive histogram expansion (${techResults.macd.histogram.toFixed(6)})`);
-      } else if (techResults.macd.histogram < 0 && techResults.macd.macdLine < techResults.macd.signalLine) {
-        bearishWeight += 15;
-        indicatorConsensus.bearishCount++;
-        supportingEvidence.push(`MACD negative histogram expansion (${techResults.macd.histogram.toFixed(6)})`);
-      }
+    if (indicators.macd) {
+      maximumWeight += 15;
+      if (indicators.macd.histogram > 0) { bullishWeight += 15; consensus.bullishCount++; supportingEvidence.push('MACD histogram is positive.'); }
+      else if (indicators.macd.histogram < 0) { bearishWeight += 15; consensus.bearishCount++; supportingEvidence.push('MACD histogram is negative.'); }
+      else consensus.neutralCount++;
     }
-
-    // Candlestick Pattern Weight
-    for (const pattern of candlestickMatches) {
-      maxPossibleWeight += 15;
-      if (pattern.type === 'BULLISH') {
-        bullishWeight += 15;
-        supportingEvidence.push(`Candlestick Pattern: ${pattern.patternName} (${pattern.description})`);
-      } else if (pattern.type === 'BEARISH') {
-        bearishWeight += 15;
-        supportingEvidence.push(`Candlestick Pattern: ${pattern.patternName} (${pattern.description})`);
-      } else {
-        opposingEvidence.push(`Candlestick Pattern: ${pattern.patternName} signals market indecision.`);
-      }
-    }
+    // Patterns contribute one bounded vote per direction, not unbounded votes for
+    // several overlapping classifications of the same three candles.
+    const bullishPattern = patterns.some(p => p.type === 'BULLISH');
+    const bearishPattern = patterns.some(p => p.type === 'BEARISH');
+    if (bullishPattern || bearishPattern) maximumWeight += 15;
+    if (bullishPattern && bearishPattern) opposingEvidence.push('Candlestick rules detected conflicting bullish and bearish formations.');
+    else if (bullishPattern) { bullishWeight += 15; supportingEvidence.push(`Bullish pattern: ${patterns.find(p => p.type === 'BULLISH')?.patternName}.`); }
+    else if (bearishPattern) { bearishWeight += 15; supportingEvidence.push(`Bearish pattern: ${patterns.find(p => p.type === 'BEARISH')?.patternName}.`); }
+    if (patterns.some(p => p.type === 'NEUTRAL')) opposingEvidence.push('A neutral candlestick formation indicates indecision.');
   }
 
-  // 2. Vision AI Integration
   if (visionResult) {
-    maxPossibleWeight += 35;
-    if (visionResult.signal === 'CALL') {
-      bullishWeight += 35 * (visionResult.evidenceQuality / 100);
-      supportingEvidence.push(`AI Vision detected Bullish chart setup (Quality: ${visionResult.evidenceQuality}%)`);
-    } else if (visionResult.signal === 'PUT') {
-      bearishWeight += 35 * (visionResult.evidenceQuality / 100);
-      supportingEvidence.push(`AI Vision detected Bearish chart setup (Quality: ${visionResult.evidenceQuality}%)`);
-    } else {
-      opposingEvidence.push(`AI Vision output WAIT: ${visionResult.riskNotes || 'Visual evidence incomplete'}`);
-    }
-
-    if (visionResult.conflicts && visionResult.conflicts.length > 0) {
-      opposingEvidence.push(...visionResult.conflicts);
-    }
+    maximumWeight += 35;
+    const quality = Number.isFinite(visionResult.evidenceQuality) ? Math.max(0, Math.min(100, visionResult.evidenceQuality)) : 0;
+    if (!visionResult.chartReadable || quality < 60) opposingEvidence.push('Vision image is unreadable or its evidence quality is below 60/100.');
+    else if (visionResult.signal === 'CALL') { bullishWeight += 35 * quality / 100; supportingEvidence.push(`Vision model reported CALL with ${quality}/100 visual evidence quality.`); }
+    else if (visionResult.signal === 'PUT') { bearishWeight += 35 * quality / 100; supportingEvidence.push(`Vision model reported PUT with ${quality}/100 visual evidence quality.`); }
+    else opposingEvidence.push(`Vision model returned WAIT: ${visionResult.riskNotes || 'visual evidence is inconclusive'}`);
+    opposingEvidence.push(...(visionResult.conflicts || []));
+    opposingEvidence.push(...(visionResult.opposingEvidence || []));
   }
 
-  // 3. Multi-Timeframe Confirmation
   if (higherTimeframeCandles && higherTimeframeCandles.length >= 10) {
-    const htfCloses = higherTimeframeCandles.map((c) => c.close);
-    const htfLast = htfCloses[htfCloses.length - 1];
-    const htfFirst = htfCloses[0];
-
-    maxPossibleWeight += 15;
-    if (htfLast > htfFirst) {
-      bullishWeight += 15;
-      supportingEvidence.push(`Higher Timeframe trend is Bullish`);
-    } else if (htfLast < htfFirst) {
-      bearishWeight += 15;
-      supportingEvidence.push(`Higher Timeframe trend is Bearish`);
-    }
+    maximumWeight += 15;
+    const first = higherTimeframeCandles[0].close;
+    const last = higherTimeframeCandles[higherTimeframeCandles.length - 1].close;
+    if (last > first) { bullishWeight += 15; supportingEvidence.push('Supplied higher-timeframe candles trend upward.'); }
+    else if (last < first) { bearishWeight += 15; supportingEvidence.push('Supplied higher-timeframe candles trend downward.'); }
+    else opposingEvidence.push('Supplied higher-timeframe candles are unchanged.');
   }
 
-  // Calculate Overall Evidence Quality Score (0 - 100)
-  const totalDominantWeight = Math.max(bullishWeight, bearishWeight);
-  const rawQuality = maxPossibleWeight > 0 ? (totalDominantWeight / maxPossibleWeight) * 100 : 0;
-  const evidenceQualityScore = Math.min(100, Math.round(rawQuality));
-
-  // Determine Consensus Trend Bias
-  if (bullishWeight > bearishWeight + 15) {
-    indicatorConsensus.trendBias = 'BULLISH';
-  } else if (bearishWeight > bullishWeight + 15) {
-    indicatorConsensus.trendBias = 'BEARISH';
-  } else {
-    indicatorConsensus.trendBias = 'NEUTRAL';
+  const score = maximumWeight ? Math.min(100, Math.round(Math.max(bullishWeight, bearishWeight) / maximumWeight * 100)) : 0;
+  if (bullishWeight > bearishWeight + 20) consensus.trendBias = 'BULLISH';
+  else if (bearishWeight > bullishWeight + 20) consensus.trendBias = 'BEARISH';
+  const conflicted = bullishWeight > 0 && bearishWeight > 0 && Math.min(bullishWeight, bearishWeight) / Math.max(bullishWeight, bearishWeight) > 0.6;
+  let signal: FinalSignalResult['signal'] = 'WAIT';
+  let summaryReason = !maximumWeight ? 'No genuine candle or vision evidence was supplied; WAIT.' : `WAIT: evidence quality ${score}/100 is below the configured ${threshold}/100 threshold or evidence is conflicting.`;
+  if (score >= threshold && opposingEvidence.length <= 2 && !conflicted && bullishWeight > bearishWeight + 20) {
+    signal = 'CALL'; summaryReason = `CALL: bullish evidence confluence ${score}/100 meets the configured threshold (${threshold}/100).`;
+  } else if (score >= threshold && opposingEvidence.length <= 2 && !conflicted && bearishWeight > bullishWeight + 20) {
+    signal = 'PUT'; summaryReason = `PUT: bearish evidence confluence ${score}/100 meets the configured threshold (${threshold}/100).`;
   }
-
-  // 4. Default WAIT Decision Matrix
-  let finalSignal: 'CALL' | 'PUT' | 'WAIT' = 'WAIT';
-  let summaryReason = 'Insufficient or conflicting evidence across indicators, candlestick patterns, and vision AI.';
-
-  const MIN_REQUIRED_QUALITY = 65;
-
-  if (
-    bullishWeight > bearishWeight + 20 &&
-    evidenceQualityScore >= MIN_REQUIRED_QUALITY &&
-    opposingEvidence.length <= 2
-  ) {
-    finalSignal = 'CALL';
-    summaryReason = `Strong Bullish confluence (${evidenceQualityScore}% quality) supported by trend momentum and pattern alignment.`;
-  } else if (
-    bearishWeight > bullishWeight + 20 &&
-    evidenceQualityScore >= MIN_REQUIRED_QUALITY &&
-    opposingEvidence.length <= 2
-  ) {
-    finalSignal = 'PUT';
-    summaryReason = `Strong Bearish confluence (${evidenceQualityScore}% quality) supported by trend momentum and pattern alignment.`;
-  } else {
-    finalSignal = 'WAIT';
-    if (opposingEvidence.length > 2) {
-      summaryReason = `WAIT recommended: ${opposingEvidence.length} opposing factors or conflicting signals detected.`;
-    } else if (evidenceQualityScore < MIN_REQUIRED_QUALITY) {
-      summaryReason = `WAIT recommended: Evidence quality score (${evidenceQualityScore}%) is below the safe threshold of ${MIN_REQUIRED_QUALITY}%.`;
-    }
-  }
-
-  riskNotes.push('Never risk more than 1-2% of total capital per trade.');
-  riskNotes.push('Binary options carry market risk. Always wait for candle confirmation at key level boundaries.');
-
-  return {
-    signal: finalSignal,
-    evidenceQualityScore,
-    summaryReason,
-    supportingEvidence,
-    opposingEvidence,
-    indicatorConsensus,
-    candlestickMatches,
-    visionInsights: visionResult,
-    invalidationLevel: candles && candles.length > 0 ? candles[candles.length - 1].low : undefined,
-    riskNotes,
-    disclaimer:
-      'Analysis-only assistant. Evidence score represents technical confluence quality, NOT a guaranteed win rate or profit guarantee.',
-  };
+  if (!candles?.length) riskNotes.push('No OHLC candle data supplied; technical indicators and candlestick confirmations are unavailable.');
+  return { signal, evidenceQualityScore: score, summaryReason, supportingEvidence, opposingEvidence,
+    indicatorConsensus: consensus, candlestickMatches: patterns, visionInsights: visionResult,
+    invalidationLevel: candles?.length ? candles[candles.length - 1].low : undefined,
+    riskNotes, disclaimer: 'Analysis only. Evidence quality is a confluence score, not a probability of success or profit guarantee.' };
 }
