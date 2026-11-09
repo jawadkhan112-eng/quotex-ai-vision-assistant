@@ -2,498 +2,249 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import multer from 'multer';
-import path from 'path';
-import fs from 'fs';
-
+import { GoogleGenAI } from '@google/genai';
 import { db } from './server/db.js';
 import { getActiveAiConfig, saveCustomAiConfig, deleteCustomApiKey } from './server/apiKeyManager.js';
 import { analyzeChartImage } from './server/geminiVision.js';
-import { analyzeTechnicalIndicators, findSupportResistance, OHLC } from './server/indicators.js';
+import { analyzeTechnicalIndicators, type OHLC } from './server/indicators.js';
 import { detectCandlestickPatterns } from './server/candlesticks.js';
 import { generateFusedSignal } from './server/signalEngine.js';
 import { askVoiceAssistant } from './server/voiceAssistant.js';
 import { runStrategyBacktest } from './server/backtester.js';
 
 dotenv.config();
-
 const app = express();
 const PORT = process.env.PORT || 3000;
-
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_CANDLES = 5000;
 app.use(cors());
-app.use(express.json({ limit: '20mb' }));
-app.use(express.urlencoded({ extended: true, limit: '20mb' }));
+app.use(express.json({ limit: '12mb' }));
+app.use(express.urlencoded({ extended: true, limit: '12mb' }));
 
-// Set up image upload directory
-const isVercel = Boolean(process.env.VERCEL);
-const UPLOADS_DIR = isVercel ? '/tmp/uploads' : path.resolve(process.cwd(), 'uploads');
-
-if (!fs.existsSync(UPLOADS_DIR)) {
-  try {
-    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-  } catch (e) {
-    console.warn('Could not create UPLOADS_DIR, using fallback:', e);
-  }
-}
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
-  filename: (_req, file, cb) => cb(null, `${Date.now()}_${file.originalname}`),
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_IMAGE_BYTES, files: 1 },
+  fileFilter: (_req, file, callback) => {
+    const allowed = ['image/png', 'image/jpeg', 'image/webp'].includes(file.mimetype);
+    callback(allowed ? null : new Error('Unsupported image type. Use PNG, JPEG, or WEBP.'), allowed);
+  },
 });
-const upload = multer({ storage });
 
-// Helper to generate sample OHLC data for testing
-function generateSampleOHLC(symbol: string, timeframe: string, count = 100): OHLC[] {
+/** Validate provided OHLC data; never synthesize prices to fill missing market data. */
+export function validateCandles(value: unknown, minCount = 1): OHLC[] | null {
+  if (!Array.isArray(value) || value.length < minCount || value.length > MAX_CANDLES) return null;
   const candles: OHLC[] = [];
-  let basePrice = symbol.includes('JPY') ? 155.20 : 1.0850;
-  const volatility = symbol.includes('JPY') ? 0.08 : 0.0004;
-  let now = Date.now() - count * 60 * 1000;
-
-  for (let i = 0; i < count; i++) {
-    const open = basePrice;
-    const change = (Math.random() - 0.48) * volatility;
-    const close = open + change;
-    const high = Math.max(open, close) + Math.random() * volatility * 0.5;
-    const low = Math.min(open, close) - Math.random() * volatility * 0.5;
-
-    candles.push({
-      timestamp: now + i * 60 * 1000,
-      open: Number(open.toFixed(5)),
-      high: Number(high.toFixed(5)),
-      low: Number(low.toFixed(5)),
-      close: Number(close.toFixed(5)),
-      volume: Math.floor(Math.random() * 500) + 100,
-    });
-    basePrice = close;
+  for (const item of value) {
+    if (!item || typeof item !== 'object') return null;
+    const c = item as Record<string, unknown>;
+    if (!(typeof c.timestamp === 'string' || (typeof c.timestamp === 'number' && Number.isFinite(c.timestamp)))) return null;
+    if (![c.open, c.high, c.low, c.close].every((n) => typeof n === 'number' && Number.isFinite(n))) return null;
+    const open = c.open as number, high = c.high as number, low = c.low as number, close = c.close as number;
+    if (high < low || high < Math.max(open, close) || low > Math.min(open, close)) return null;
+    if (c.volume !== undefined && (typeof c.volume !== 'number' || !Number.isFinite(c.volume) || c.volume < 0)) return null;
+    candles.push({ timestamp: c.timestamp as string | number, open, high, low, close,
+      ...(c.volume === undefined ? {} : { volume: c.volume as number }) });
   }
   return candles;
 }
 
-// REST API Endpoints
+function reportError(res: express.Response, error: unknown, fallback: string) {
+  res.status(500).json({ success: false, error: error instanceof Error ? error.message : fallback });
+}
 
-// 1. Health check & Diagnostics
 app.get('/api/health', (_req, res) => {
-  const aiConfig = getActiveAiConfig();
-  const isKeyConfigured = Boolean(aiConfig.apiKey);
-
-  let dbStatus = 'OFFLINE';
-  try {
-    const row = db.prepare('SELECT count(*) as count FROM user_settings').get() as { count: number };
-    if (row) dbStatus = 'ONLINE';
-  } catch (err) {
-    dbStatus = 'ERROR';
-  }
-
-  res.json({
-    status: 'OK',
-    app: 'Quotex AI Vision Assistant',
-    version: '1.0.0',
-    geminiKeyConfigured: isKeyConfigured,
-    geminiKeyPrefix: aiConfig.maskedKey,
-    activeProvider: aiConfig.provider,
-    activeModel: aiConfig.model,
-    isCustomKey: aiConfig.isCustomKey,
-    databaseStatus: dbStatus,
-    timestamp: new Date().toISOString(),
-  });
+  const config = getActiveAiConfig();
+  let databaseStatus = 'OFFLINE';
+  try { db.prepare('SELECT count(*) FROM user_settings').get(); databaseStatus = 'ONLINE'; } catch { databaseStatus = 'ERROR'; }
+  res.json({ status: 'OK', app: 'Quotex AI Vision Assistant', version: '1.0.0',
+    geminiKeyConfigured: Boolean(config.apiKey), geminiKeyPrefix: config.maskedKey,
+    activeProvider: config.provider, activeModel: config.model, isCustomKey: config.isCustomKey,
+    databaseStatus, timestamp: new Date().toISOString() });
 });
 
-// 2. GET AI Provider Configuration (Secure - Returns masked key only)
 app.get('/api/ai-config', (_req, res) => {
   try {
-    const config = getActiveAiConfig();
-    res.json({
-      success: true,
-      provider: config.provider,
-      model: config.model,
-      maskedKey: config.maskedKey,
-      isCustomKey: config.isCustomKey,
-      hasKey: Boolean(config.apiKey),
-      evidenceThreshold: config.evidenceThreshold,
-      supportedModels: [
-        { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash (Recommended · Fast Vision)', vision: true },
-        { id: 'gemini-4-argon', name: 'Gemini 4 Argon (High Thinking · Complex Analysis)', vision: true },
-        { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite (Ultra Fast)', vision: true },
-      ],
-    });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+    const c = getActiveAiConfig();
+    res.json({ success: true, provider: c.provider, model: c.model, maskedKey: c.maskedKey,
+      isCustomKey: c.isCustomKey, hasKey: Boolean(c.apiKey), evidenceThreshold: c.evidenceThreshold,
+      supportedModels: [{ id: c.model, name: c.model, vision: true }] });
+  } catch (e) { reportError(res, e, 'Could not load AI configuration'); }
 });
 
-// Save AI Provider Configuration
 app.post('/api/ai-config', (req, res) => {
   try {
-    const { apiKey, provider, model, evidenceThreshold } = req.body;
-    const updated = saveCustomAiConfig({ apiKey, provider, model, evidenceThreshold });
-
-    res.json({
-      success: true,
-      message: 'AI Provider configuration updated successfully.',
-      provider: updated.provider,
-      model: updated.model,
-      maskedKey: updated.maskedKey,
-      isCustomKey: updated.isCustomKey,
-      hasKey: Boolean(updated.apiKey),
-      evidenceThreshold: updated.evidenceThreshold,
-    });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+    const { apiKey, provider, model, evidenceThreshold } = req.body ?? {};
+    if (apiKey !== undefined && typeof apiKey !== 'string') return res.status(400).json({ success: false, error: 'API key must be text.' });
+    if (provider !== undefined && provider !== 'gemini') return res.status(400).json({ success: false, error: 'Only Gemini is implemented.' });
+    if (model !== undefined && (typeof model !== 'string' || !model.trim())) return res.status(400).json({ success: false, error: 'Invalid model.' });
+    if (evidenceThreshold !== undefined && (!Number.isInteger(evidenceThreshold) || evidenceThreshold < 50 || evidenceThreshold > 90)) return res.status(400).json({ success: false, error: 'Threshold must be an integer from 50 to 90.' });
+    const c = saveCustomAiConfig({ apiKey, provider, model, evidenceThreshold });
+    res.json({ success: true, provider: c.provider, model: c.model, maskedKey: c.maskedKey,
+      isCustomKey: c.isCustomKey, hasKey: Boolean(c.apiKey), evidenceThreshold: c.evidenceThreshold });
+  } catch (e) { reportError(res, e, 'Could not save AI configuration'); }
 });
 
-// Delete custom API key
 app.delete('/api/ai-config/key', (_req, res) => {
   try {
-    const updated = deleteCustomApiKey();
-    res.json({
-      success: true,
-      message: 'Custom API key removed. Reverted to environment key if available.',
-      maskedKey: updated.maskedKey,
-      isCustomKey: updated.isCustomKey,
-      hasKey: Boolean(updated.apiKey),
-    });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+    const c = deleteCustomApiKey();
+    res.json({ success: true, maskedKey: c.maskedKey, isCustomKey: c.isCustomKey, hasKey: Boolean(c.apiKey) });
+  } catch (e) { reportError(res, e, 'Could not remove custom API key'); }
 });
 
-// Test Gemini Connection
+// Validate the exact candidate key/model entered in settings, without persisting it.
 app.post('/api/test-gemini', async (req, res) => {
-  const startTime = Date.now();
+  const start = Date.now();
   try {
-    const { apiKeyOverride, modelOverride } = req.body || {};
-    const aiConfig = getActiveAiConfig();
-    const keyToTest = apiKeyOverride?.trim() || aiConfig.apiKey;
-    const modelToTest = modelOverride || aiConfig.model;
-
-    if (!keyToTest) {
-      return res.status(400).json({
-        success: false,
-        message: 'No API key available to test. Please paste a key first.',
-      });
-    }
-
-    const prompt = 'Test Gemini API connection. Respond with "API Connection Operational".';
-    const reply = await askVoiceAssistant(prompt, { testMode: true });
-    const latencyMs = Date.now() - startTime;
-
-    if (reply.includes('invalid') || reply.includes('expired') || reply.includes('no AI API key')) {
-      return res.status(400).json({
-        success: false,
-        message: reply,
-        latencyMs,
-      });
-    }
-
-    res.json({
-      success: true,
-      message: `Gemini API connection validated successfully (${latencyMs}ms)!`,
-      activeModel: modelToTest,
-      maskedKey: keyToTest.length >= 8 ? `${keyToTest.slice(0, 4)}...${keyToTest.slice(-4)}` : 'SET',
-      latencyMs,
-      sampleResponse: reply,
-    });
-  } catch (err: any) {
-    res.status(500).json({
-      success: false,
-      message: err.message || 'Gemini API validation failed.',
-    });
+    const saved = getActiveAiConfig();
+    const key = typeof req.body?.apiKeyOverride === 'string' && req.body.apiKeyOverride.trim() ? req.body.apiKeyOverride.trim() : saved.apiKey;
+    const model = typeof req.body?.modelOverride === 'string' && req.body.modelOverride.trim() ? req.body.modelOverride.trim() : saved.model;
+    if (!key) return res.status(400).json({ success: false, message: 'No API key available to test.' });
+    const client = new GoogleGenAI({ apiKey: key });
+    const response = await client.models.generateContent({ model, contents: 'Reply exactly: API connection operational.' });
+    const latencyMs = Date.now() - start;
+    res.json({ success: true, message: `Gemini API connection validated (${latencyMs}ms).`, activeModel: model,
+      maskedKey: key.length >= 8 ? `${key.slice(0, 4)}...${key.slice(-4)}` : 'SET', latencyMs, sampleResponse: response.text || '' });
+  } catch (e) {
+    res.status(400).json({ success: false, message: e instanceof Error ? e.message : 'Gemini API validation failed.', latencyMs: Date.now() - start });
   }
 });
 
-// 3. Vision Screenshot Analysis
 app.post('/api/analyze-vision', upload.single('screenshot'), async (req, res) => {
   try {
-    const { symbol = 'EUR/USD (OTC)', timeframe = '1M', base64Image, model } = req.body;
-
-    let imageBuffer: string;
+    const { symbol = 'Unknown', timeframe = 'Unknown', base64Image, model, candles: rawCandles } = req.body ?? {};
+    let image: string;
     let mimeType = 'image/png';
-    let savedFileName = '';
+    if (req.file) { image = req.file.buffer.toString('base64'); mimeType = req.file.mimetype; }
+    else if (typeof base64Image === 'string' && base64Image.length) {
+      const match = base64Image.match(/^data:(image\/(?:png|jpeg|webp));base64,/);
+      if (base64Image.startsWith('data:') && !match) return res.status(400).json({ success: false, error: 'Image must be PNG, JPEG, or WEBP.' });
+      if (match) mimeType = match[1];
+      image = base64Image.replace(/^data:image\/(?:png|jpeg|webp);base64,/, '');
+      if (image.length > Math.ceil(MAX_IMAGE_BYTES * 4 / 3)) return res.status(413).json({ success: false, error: 'Image exceeds 8 MB.' });
+    } else return res.status(400).json({ success: false, error: 'No image provided.' });
 
-    if (req.file) {
-      savedFileName = req.file.filename;
-      const fileData = fs.readFileSync(req.file.path);
-      imageBuffer = fileData.toString('base64');
-      mimeType = req.file.mimetype || 'image/png';
-    } else if (base64Image) {
-      imageBuffer = base64Image;
-      if (base64Image.startsWith('data:image/jpeg')) mimeType = 'image/jpeg';
-      else if (base64Image.startsWith('data:image/webp')) mimeType = 'image/webp';
-    } else {
-      return res.status(400).json({ error: 'No image provided. Please upload a screenshot or submit base64 data.' });
+    let candles: OHLC[] | null = null;
+    if (rawCandles !== undefined) {
+      let value: unknown = rawCandles;
+      if (typeof rawCandles === 'string') { try { value = JSON.parse(rawCandles); } catch { return res.status(400).json({ success: false, error: 'Invalid OHLC JSON.' }); } }
+      candles = validateCandles(value, 14);
+      if (!candles) return res.status(400).json({ success: false, error: 'Provide at least 14 valid OHLC candles.' });
     }
-
-    const aiConfig = getActiveAiConfig();
-    const modelToUse = model || aiConfig.model || 'gemini-3.8-flash';
-
-    // Run Gemini Vision Analysis
-    const visionOutput = await analyzeChartImage(imageBuffer, mimeType, symbol, timeframe, modelToUse);
-
-    // Generate sample OHLC context for indicator fusion
-    const sampleOHLC = generateSampleOHLC(symbol, timeframe, 60);
-
-    // Run Signal Fusion Engine
-    const fusedSignal = generateFusedSignal(sampleOHLC, visionOutput);
-
-    // Save to SQLite
+    const config = getActiveAiConfig();
+    const modelUsed = typeof model === 'string' && model.trim() ? model.trim() : config.model;
+    const vision = await analyzeChartImage(image, mimeType, String(symbol), String(timeframe), modelUsed);
+    const signal = generateFusedSignal(candles ?? undefined, vision);
     try {
-      const stmt = db.prepare(`
-        INSERT INTO analysis_history (
-          timestamp, symbol, timeframe, signal, evidence_score, chart_readable,
-          trend, momentum, candle_observation, visible_indicators, support_resistance,
-          reasons, opposing_evidence, conflicts, invalidation, risk_notes, image_path, model_used
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-
-      stmt.run(
-        new Date().toISOString(),
-        symbol,
-        timeframe,
-        fusedSignal.signal,
-        fusedSignal.evidenceQualityScore,
-        visionOutput.chartReadable ? 1 : 0,
-        visionOutput.trend,
-        visionOutput.momentum,
-        visionOutput.candleObservation,
-        JSON.stringify(visionOutput.visibleIndicators || []),
-        visionOutput.supportResistance,
-        JSON.stringify(fusedSignal.supportingEvidence),
-        JSON.stringify(fusedSignal.opposingEvidence),
-        JSON.stringify(visionOutput.conflicts || []),
-        visionOutput.invalidation,
-        visionOutput.riskNotes,
-        savedFileName,
-        modelToUse
-      );
-    } catch (dbErr) {
-      console.warn('Could not save history record to DB:', dbErr);
-    }
-
-    res.json({
-      success: true,
-      result: fusedSignal,
-      rawVision: visionOutput,
-      savedFileName,
-    });
-  } catch (err: any) {
-    console.error('Vision analysis endpoint error:', err);
-    res.status(500).json({
-      success: false,
-      error: err.message || 'Vision analysis failed',
-    });
-  }
+      db.prepare(`INSERT INTO analysis_history (timestamp, symbol, timeframe, signal, evidence_score, chart_readable,
+        trend, momentum, candle_observation, visible_indicators, support_resistance, reasons, opposing_evidence,
+        conflicts, invalidation, risk_notes, image_path, model_used) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(new Date().toISOString(), String(symbol), String(timeframe), signal.signal, signal.evidenceQualityScore,
+          vision.chartReadable ? 1 : 0, vision.trend, vision.momentum, vision.candleObservation,
+          JSON.stringify(vision.visibleIndicators || []), vision.supportResistance, JSON.stringify(signal.supportingEvidence),
+          JSON.stringify(signal.opposingEvidence), JSON.stringify(vision.conflicts || []), vision.invalidation, vision.riskNotes, '', modelUsed);
+    } catch (e) { console.warn('History persistence unavailable:', e instanceof Error ? e.message : 'database error'); }
+    res.json({ success: true, result: signal, rawVision: vision,
+      dataSource: candles ? 'User-supplied OHLC plus screenshot vision' : 'Screenshot vision only; no OHLC supplied' });
+  } catch (e) { console.error('Vision analysis failed:', e instanceof Error ? e.message : 'unknown error'); reportError(res, e, 'Vision analysis failed'); }
 });
 
-// 4. Technical Indicator Analysis Endpoint
 app.post('/api/analyze-technical', (req, res) => {
   try {
-    const { symbol = 'EUR/USD (OTC)', timeframe = '1M', candles } = req.body;
-
-    const ohlcData: OHLC[] = candles && Array.isArray(candles) && candles.length > 0
-      ? candles
-      : generateSampleOHLC(symbol, timeframe, 100);
-
-    const indicators = analyzeTechnicalIndicators(ohlcData);
-    const candlestickPatterns = detectCandlestickPatterns(ohlcData);
-    const fusedSignal = generateFusedSignal(ohlcData);
-
-    res.json({
-      success: true,
-      symbol,
-      timeframe,
-      candleCount: ohlcData.length,
-      lastCandle: ohlcData[ohlcData.length - 1],
-      indicators,
-      candlestickPatterns,
-      fusedSignal,
-    });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+    const { symbol = 'Unknown', timeframe = 'Unknown' } = req.body ?? {};
+    const candles = validateCandles(req.body?.candles, 14);
+    if (!candles) return res.status(400).json({ success: false, code: 'OHLC_DATA_REQUIRED', error: 'Provide at least 14 valid OHLC candles; synthetic data is disabled.' });
+    res.json({ success: true, symbol, timeframe, candleCount: candles.length, dataSource: 'User-supplied OHLC',
+      lastCandle: candles[candles.length - 1], indicators: analyzeTechnicalIndicators(candles),
+      candlestickPatterns: detectCandlestickPatterns(candles), fusedSignal: generateFusedSignal(candles) });
+  } catch (e) { reportError(res, e, 'Technical analysis failed'); }
 });
 
-// 5. Ask Voice Assistant
 app.post('/api/ask-voice', async (req, res) => {
   try {
-    const { query, context } = req.body;
-    if (!query) return res.status(400).json({ error: 'Query prompt required' });
-
-    const reply = await askVoiceAssistant(query, context);
-    res.json({ success: true, reply });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+    const { query, context } = req.body ?? {};
+    if (typeof query !== 'string' || !query.trim()) return res.status(400).json({ success: false, error: 'Query prompt required.' });
+    if (query.length > 4000) return res.status(400).json({ success: false, error: 'Query exceeds 4,000 characters.' });
+    res.json({ success: true, reply: await askVoiceAssistant(query, context) });
+  } catch (e) { reportError(res, e, 'Assistant request failed'); }
 });
 
-// 6. Backtesting Runner Endpoint
 app.post('/api/backtest', (req, res) => {
   try {
-    const { symbol = 'EUR/USD (OTC)', timeframe = '1M', expiryCandles = 1, payoutPercentage = 85, evidenceThreshold = 65, candles } = req.body;
-
-    const ohlcData: OHLC[] = candles && Array.isArray(candles) && candles.length > 50
-      ? candles
-      : generateSampleOHLC(symbol, timeframe, 300);
-
-    const result = runStrategyBacktest(ohlcData, {
-      symbol,
-      timeframe,
-      expiryCandles: Number(expiryCandles),
-      payoutPercentage: Number(payoutPercentage),
-      evidenceThreshold: Number(evidenceThreshold),
-    });
-
+    const { symbol = 'Unknown', timeframe = 'Unknown', expiryCandles = 1, payoutPercentage = 85, evidenceThreshold = 65 } = req.body ?? {};
+    const candles = validateCandles(req.body?.candles, 51);
+    if (!candles) return res.status(400).json({ success: false, code: 'HISTORICAL_OHLC_REQUIRED', error: 'Provide at least 51 valid historical OHLC candles; synthetic backtest data is disabled.' });
+    if (!Number.isInteger(Number(expiryCandles)) || Number(expiryCandles) < 1 || Number(expiryCandles) > 100) return res.status(400).json({ success: false, error: 'Expiry must be 1–100 candles.' });
+    if (!Number.isFinite(Number(payoutPercentage)) || Number(payoutPercentage) <= 0 || Number(payoutPercentage) > 100) return res.status(400).json({ success: false, error: 'Payout must be >0 and <=100.' });
+    if (!Number.isFinite(Number(evidenceThreshold)) || Number(evidenceThreshold) < 0 || Number(evidenceThreshold) > 100) return res.status(400).json({ success: false, error: 'Evidence threshold must be 0–100.' });
+    const result = runStrategyBacktest(candles, { symbol: String(symbol), timeframe: String(timeframe), expiryCandles: Number(expiryCandles), payoutPercentage: Number(payoutPercentage), evidenceThreshold: Number(evidenceThreshold) });
     try {
-      const stmt = db.prepare(`
-        INSERT INTO backtest_results (
-          timestamp, symbol, timeframe, total_candles, total_signals,
-          call_count, put_count, wait_count, win_count, loss_count,
-          win_rate, profit_factor, expectancy, max_drawdown, config_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-
-      stmt.run(
-        new Date().toISOString(),
-        result.symbol,
-        result.timeframe,
-        result.totalCandles,
-        result.totalSignals,
-        result.callCount,
-        result.putCount,
-        result.waitCount,
-        result.winCount,
-        result.lossCount,
-        result.winRate,
-        result.profitFactor,
-        result.expectancy,
-        result.maxDrawdown,
-        JSON.stringify({ expiryCandles, payoutPercentage, evidenceThreshold })
-      );
-    } catch (dbErr) {
-      console.warn('Could not save backtest result:', dbErr);
-    }
-
-    res.json({ success: true, backtest: result });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+      db.prepare(`INSERT INTO backtest_results (timestamp, symbol, timeframe, total_candles, total_signals, call_count,
+        put_count, wait_count, win_count, loss_count, win_rate, profit_factor, expectancy, max_drawdown, config_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(new Date().toISOString(), result.symbol, result.timeframe, result.totalCandles, result.totalSignals,
+          result.callCount, result.putCount, result.waitCount, result.winCount, result.lossCount, result.winRate,
+          result.profitFactor, result.expectancy, result.maxDrawdown,
+          JSON.stringify({ expiryCandles, payoutPercentage, evidenceThreshold, dataSource: 'User-supplied historical OHLC' }));
+    } catch (e) { console.warn('Backtest persistence unavailable:', e instanceof Error ? e.message : 'database error'); }
+    res.json({ success: true, dataSource: 'User-supplied historical OHLC', backtest: result });
+  } catch (e) { reportError(res, e, 'Backtest failed'); }
 });
 
-// 7. Get Analysis History
 app.get('/api/history', (req, res) => {
   try {
-    const { limit = 50, symbol, signal } = req.query;
-
-    let query = 'SELECT * FROM analysis_history WHERE 1=1';
-    const params: any[] = [];
-
-    if (symbol) {
-      query += ' AND symbol = ?';
-      params.push(symbol);
-    }
-    if (signal) {
-      query += ' AND signal = ?';
-      params.push(signal);
-    }
-
-    query += ' ORDER BY id DESC LIMIT ?';
-    params.push(Number(limit));
-
-    const rows = db.prepare(query).all(...params);
-    res.json({ success: true, count: rows.length, history: rows });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+    const { symbol, signal } = req.query;
+    let sql = 'SELECT * FROM analysis_history WHERE 1=1';
+    const params: (string | number)[] = [];
+    if (typeof symbol === 'string' && symbol) { sql += ' AND symbol = ?'; params.push(symbol); }
+    if (typeof signal === 'string' && ['CALL', 'PUT', 'WAIT'].includes(signal)) { sql += ' AND signal = ?'; params.push(signal); }
+    sql += ' ORDER BY id DESC LIMIT ?'; params.push(limit);
+    const history = db.prepare(sql).all(...params);
+    res.json({ success: true, count: history.length, history });
+  } catch (e) { reportError(res, e, 'Could not load history'); }
 });
-
-// Delete history item
 app.delete('/api/history/:id', (req, res) => {
-  try {
-    const { id } = req.params;
-    db.prepare('DELETE FROM analysis_history WHERE id = ?').run(id);
-    res.json({ success: true });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) return res.status(400).json({ success: false, error: 'Invalid history ID.' });
+  try { const result = db.prepare('DELETE FROM analysis_history WHERE id = ?').run(id); res.json({ success: true, deleted: result.changes }); }
+  catch (e) { reportError(res, e, 'Could not delete history record'); }
 });
-
-// Clear all history
 app.delete('/api/history', (_req, res) => {
-  try {
-    db.prepare('DELETE FROM analysis_history').run();
-    res.json({ success: true });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+  try { db.prepare('DELETE FROM analysis_history').run(); res.json({ success: true }); }
+  catch (e) { reportError(res, e, 'Could not clear history'); }
 });
 
-// 8. Get Sample OHLC
-app.get('/api/ohlc-sample', (req, res) => {
-  const { symbol = 'EUR/USD (OTC)', timeframe = '1M', count = 100 } = req.query;
-  const candles = generateSampleOHLC(String(symbol), String(timeframe), Number(count));
-  res.json({ success: true, symbol, timeframe, candles });
-});
+// Retire the endpoint which previously returned fabricated sample prices.
+app.get('/api/ohlc-sample', (_req, res) => res.status(410).json({ success: false,
+  code: 'SYNTHETIC_DATA_DISABLED', error: 'Synthetic OHLC data is disabled. Supply real OHLC from a verified data source.' }));
 
-// 9. User Settings API
 app.get('/api/settings', (_req, res) => {
   try {
-    const rows = db.prepare('SELECT * FROM user_settings').all() as { key: string; value: string }[];
-    const settingsObj: Record<string, string> = {};
-    for (const r of rows) {
-      // Redact custom_gemini_key
-      if (r.key === 'custom_gemini_key') {
-        settingsObj['custom_gemini_key'] = r.value ? `${r.value.slice(0, 4)}...${r.value.slice(-4)}` : '';
-      } else {
-        settingsObj[r.key] = r.value;
-      }
-    }
-    res.json({ success: true, settings: settingsObj });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+    const rows = db.prepare('SELECT key, value FROM user_settings').all() as { key: string; value: string }[];
+    const settings: Record<string, string> = {};
+    for (const row of rows) settings[row.key] = row.key === 'custom_gemini_key' ? getActiveAiConfig().maskedKey : row.value;
+    res.json({ success: true, settings });
+  } catch (e) { reportError(res, e, 'Could not load settings'); }
 });
-
 app.post('/api/settings', (req, res) => {
   try {
-    const { settings } = req.body;
-    if (!settings || typeof settings !== 'object') {
-      return res.status(400).json({ error: 'Invalid settings object' });
-    }
-
-    const stmt = db.prepare('INSERT OR REPLACE INTO user_settings (key, value) VALUES (?, ?)');
-    const transaction = db.transaction((data: Record<string, string>) => {
-      for (const [k, v] of Object.entries(data)) {
-        stmt.run(k, String(v));
-      }
-    });
-
-    transaction(settings);
+    const settings = req.body?.settings;
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return res.status(400).json({ success: false, error: 'Invalid settings object.' });
+    const allowed = new Set(['default_symbol', 'default_timeframe', 'auto_save_screenshots', 'evidence_threshold', 'theme']);
+    const entries = Object.entries(settings).filter(([key, value]) => allowed.has(key) && ['string', 'number', 'boolean'].includes(typeof value));
+    const statement = db.prepare('INSERT OR REPLACE INTO user_settings (key, value) VALUES (?, ?)');
+    db.transaction(() => { for (const [key, value] of entries) statement.run(key, String(value)); })();
     res.json({ success: true, message: 'Settings saved' });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+  } catch (e) { reportError(res, e, 'Could not save settings'); }
 });
 
-// Export Express App for Vite Integration in Server Mode
 export { app };
-
-// Start Standalone / Integrated Server
 async function startServer() {
   if (process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'test') {
     const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
+    const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
     app.use(vite.middlewares);
   }
-
-  if (process.env.NODE_ENV !== 'test') {
-    app.listen(PORT, () => {
-      console.log(`[Quotex AI Vision Assistant] Full-stack application active on http://localhost:${PORT}`);
-    });
-  }
+  if (process.env.NODE_ENV !== 'test') app.listen(PORT, () => console.log(`[Quotex AI Vision Assistant] Active on http://localhost:${PORT}`));
 }
-
-startServer().catch((err) => {
-  console.error('Server startup error:', err);
-});
+startServer().catch((error) => console.error('Server startup error:', error));
