@@ -4,9 +4,9 @@ import dotenv from 'dotenv';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { fileURLToPath } from 'url';
 
 import { db } from './server/db.js';
+import { getActiveAiConfig, saveCustomAiConfig, deleteCustomApiKey } from './server/apiKeyManager.js';
 import { analyzeChartImage } from './server/geminiVision.js';
 import { analyzeTechnicalIndicators, findSupportResistance, OHLC } from './server/indicators.js';
 import { detectCandlestickPatterns } from './server/candlesticks.js';
@@ -24,9 +24,15 @@ app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
 // Set up image upload directory
-const UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
+const isVercel = Boolean(process.env.VERCEL);
+const UPLOADS_DIR = isVercel ? '/tmp/uploads' : path.resolve(process.cwd(), 'uploads');
+
 if (!fs.existsSync(UPLOADS_DIR)) {
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  try {
+    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  } catch (e) {
+    console.warn('Could not create UPLOADS_DIR, using fallback:', e);
+  }
 }
 
 const storage = multer.diskStorage({
@@ -66,8 +72,8 @@ function generateSampleOHLC(symbol: string, timeframe: string, count = 100): OHL
 
 // 1. Health check & Diagnostics
 app.get('/api/health', (_req, res) => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  const isKeyConfigured = Boolean(apiKey && apiKey !== 'MY_GEMINI_API_KEY');
+  const aiConfig = getActiveAiConfig();
+  const isKeyConfigured = Boolean(aiConfig.apiKey);
 
   let dbStatus = 'OFFLINE';
   try {
@@ -82,13 +88,120 @@ app.get('/api/health', (_req, res) => {
     app: 'Quotex AI Vision Assistant',
     version: '1.0.0',
     geminiKeyConfigured: isKeyConfigured,
-    geminiKeyPrefix: isKeyConfigured ? `${apiKey?.slice(0, 4)}...${apiKey?.slice(-3)}` : 'NOT_SET',
+    geminiKeyPrefix: aiConfig.maskedKey,
+    activeProvider: aiConfig.provider,
+    activeModel: aiConfig.model,
+    isCustomKey: aiConfig.isCustomKey,
     databaseStatus: dbStatus,
     timestamp: new Date().toISOString(),
   });
 });
 
-// 2. Vision Screenshot Analysis
+// 2. GET AI Provider Configuration (Secure - Returns masked key only)
+app.get('/api/ai-config', (_req, res) => {
+  try {
+    const config = getActiveAiConfig();
+    res.json({
+      success: true,
+      provider: config.provider,
+      model: config.model,
+      maskedKey: config.maskedKey,
+      isCustomKey: config.isCustomKey,
+      hasKey: Boolean(config.apiKey),
+      evidenceThreshold: config.evidenceThreshold,
+      supportedModels: [
+        { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash (Recommended · Fast Vision)', vision: true },
+        { id: 'gemini-4-argon', name: 'Gemini 4 Argon (High Thinking · Complex Analysis)', vision: true },
+        { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite (Ultra Fast)', vision: true },
+      ],
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Save AI Provider Configuration
+app.post('/api/ai-config', (req, res) => {
+  try {
+    const { apiKey, provider, model, evidenceThreshold } = req.body;
+    const updated = saveCustomAiConfig({ apiKey, provider, model, evidenceThreshold });
+
+    res.json({
+      success: true,
+      message: 'AI Provider configuration updated successfully.',
+      provider: updated.provider,
+      model: updated.model,
+      maskedKey: updated.maskedKey,
+      isCustomKey: updated.isCustomKey,
+      hasKey: Boolean(updated.apiKey),
+      evidenceThreshold: updated.evidenceThreshold,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Delete custom API key
+app.delete('/api/ai-config/key', (_req, res) => {
+  try {
+    const updated = deleteCustomApiKey();
+    res.json({
+      success: true,
+      message: 'Custom API key removed. Reverted to environment key if available.',
+      maskedKey: updated.maskedKey,
+      isCustomKey: updated.isCustomKey,
+      hasKey: Boolean(updated.apiKey),
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Test Gemini Connection
+app.post('/api/test-gemini', async (req, res) => {
+  const startTime = Date.now();
+  try {
+    const { apiKeyOverride, modelOverride } = req.body || {};
+    const aiConfig = getActiveAiConfig();
+    const keyToTest = apiKeyOverride?.trim() || aiConfig.apiKey;
+    const modelToTest = modelOverride || aiConfig.model;
+
+    if (!keyToTest) {
+      return res.status(400).json({
+        success: false,
+        message: 'No API key available to test. Please paste a key first.',
+      });
+    }
+
+    const prompt = 'Test Gemini API connection. Respond with "API Connection Operational".';
+    const reply = await askVoiceAssistant(prompt, { testMode: true });
+    const latencyMs = Date.now() - startTime;
+
+    if (reply.includes('invalid') || reply.includes('expired') || reply.includes('no AI API key')) {
+      return res.status(400).json({
+        success: false,
+        message: reply,
+        latencyMs,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Gemini API connection validated successfully (${latencyMs}ms)!`,
+      activeModel: modelToTest,
+      maskedKey: keyToTest.length >= 8 ? `${keyToTest.slice(0, 4)}...${keyToTest.slice(-4)}` : 'SET',
+      latencyMs,
+      sampleResponse: reply,
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      message: err.message || 'Gemini API validation failed.',
+    });
+  }
+});
+
+// 3. Vision Screenshot Analysis
 app.post('/api/analyze-vision', upload.single('screenshot'), async (req, res) => {
   try {
     const { symbol = 'EUR/USD (OTC)', timeframe = '1M', base64Image, model } = req.body;
@@ -110,8 +223,8 @@ app.post('/api/analyze-vision', upload.single('screenshot'), async (req, res) =>
       return res.status(400).json({ error: 'No image provided. Please upload a screenshot or submit base64 data.' });
     }
 
-    // Get model setting if not passed
-    const modelToUse = model || process.env.DEFAULT_GEMINI_MODEL || 'gemini-3.8-flash';
+    const aiConfig = getActiveAiConfig();
+    const modelToUse = model || aiConfig.model || 'gemini-3.8-flash';
 
     // Run Gemini Vision Analysis
     const visionOutput = await analyzeChartImage(imageBuffer, mimeType, symbol, timeframe, modelToUse);
@@ -123,34 +236,38 @@ app.post('/api/analyze-vision', upload.single('screenshot'), async (req, res) =>
     const fusedSignal = generateFusedSignal(sampleOHLC, visionOutput);
 
     // Save to SQLite
-    const stmt = db.prepare(`
-      INSERT INTO analysis_history (
-        timestamp, symbol, timeframe, signal, evidence_score, chart_readable,
-        trend, momentum, candle_observation, visible_indicators, support_resistance,
-        reasons, opposing_evidence, conflicts, invalidation, risk_notes, image_path, model_used
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    try {
+      const stmt = db.prepare(`
+        INSERT INTO analysis_history (
+          timestamp, symbol, timeframe, signal, evidence_score, chart_readable,
+          trend, momentum, candle_observation, visible_indicators, support_resistance,
+          reasons, opposing_evidence, conflicts, invalidation, risk_notes, image_path, model_used
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
 
-    stmt.run(
-      new Date().toISOString(),
-      symbol,
-      timeframe,
-      fusedSignal.signal,
-      fusedSignal.evidenceQualityScore,
-      visionOutput.chartReadable ? 1 : 0,
-      visionOutput.trend,
-      visionOutput.momentum,
-      visionOutput.candleObservation,
-      JSON.stringify(visionOutput.visibleIndicators || []),
-      visionOutput.supportResistance,
-      JSON.stringify(fusedSignal.supportingEvidence),
-      JSON.stringify(fusedSignal.opposingEvidence),
-      JSON.stringify(visionOutput.conflicts || []),
-      visionOutput.invalidation,
-      visionOutput.riskNotes,
-      savedFileName,
-      modelToUse
-    );
+      stmt.run(
+        new Date().toISOString(),
+        symbol,
+        timeframe,
+        fusedSignal.signal,
+        fusedSignal.evidenceQualityScore,
+        visionOutput.chartReadable ? 1 : 0,
+        visionOutput.trend,
+        visionOutput.momentum,
+        visionOutput.candleObservation,
+        JSON.stringify(visionOutput.visibleIndicators || []),
+        visionOutput.supportResistance,
+        JSON.stringify(fusedSignal.supportingEvidence),
+        JSON.stringify(fusedSignal.opposingEvidence),
+        JSON.stringify(visionOutput.conflicts || []),
+        visionOutput.invalidation,
+        visionOutput.riskNotes,
+        savedFileName,
+        modelToUse
+      );
+    } catch (dbErr) {
+      console.warn('Could not save history record to DB:', dbErr);
+    }
 
     res.json({
       success: true,
@@ -167,7 +284,7 @@ app.post('/api/analyze-vision', upload.single('screenshot'), async (req, res) =>
   }
 });
 
-// 3. Technical Indicator Analysis Endpoint
+// 4. Technical Indicator Analysis Endpoint
 app.post('/api/analyze-technical', (req, res) => {
   try {
     const { symbol = 'EUR/USD (OTC)', timeframe = '1M', candles } = req.body;
@@ -195,7 +312,7 @@ app.post('/api/analyze-technical', (req, res) => {
   }
 });
 
-// 4. Ask Voice Assistant
+// 5. Ask Voice Assistant
 app.post('/api/ask-voice', async (req, res) => {
   try {
     const { query, context } = req.body;
@@ -208,7 +325,7 @@ app.post('/api/ask-voice', async (req, res) => {
   }
 });
 
-// 5. Backtesting Runner Endpoint
+// 6. Backtesting Runner Endpoint
 app.post('/api/backtest', (req, res) => {
   try {
     const { symbol = 'EUR/USD (OTC)', timeframe = '1M', expiryCandles = 1, payoutPercentage = 85, evidenceThreshold = 65, candles } = req.body;
@@ -225,32 +342,35 @@ app.post('/api/backtest', (req, res) => {
       evidenceThreshold: Number(evidenceThreshold),
     });
 
-    // Store in database
-    const stmt = db.prepare(`
-      INSERT INTO backtest_results (
-        timestamp, symbol, timeframe, total_candles, total_signals,
-        call_count, put_count, wait_count, win_count, loss_count,
-        win_rate, profit_factor, expectancy, max_drawdown, config_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    try {
+      const stmt = db.prepare(`
+        INSERT INTO backtest_results (
+          timestamp, symbol, timeframe, total_candles, total_signals,
+          call_count, put_count, wait_count, win_count, loss_count,
+          win_rate, profit_factor, expectancy, max_drawdown, config_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
 
-    stmt.run(
-      new Date().toISOString(),
-      result.symbol,
-      result.timeframe,
-      result.totalCandles,
-      result.totalSignals,
-      result.callCount,
-      result.putCount,
-      result.waitCount,
-      result.winCount,
-      result.lossCount,
-      result.winRate,
-      result.profitFactor,
-      result.expectancy,
-      result.maxDrawdown,
-      JSON.stringify({ expiryCandles, payoutPercentage, evidenceThreshold })
-    );
+      stmt.run(
+        new Date().toISOString(),
+        result.symbol,
+        result.timeframe,
+        result.totalCandles,
+        result.totalSignals,
+        result.callCount,
+        result.putCount,
+        result.waitCount,
+        result.winCount,
+        result.lossCount,
+        result.winRate,
+        result.profitFactor,
+        result.expectancy,
+        result.maxDrawdown,
+        JSON.stringify({ expiryCandles, payoutPercentage, evidenceThreshold })
+      );
+    } catch (dbErr) {
+      console.warn('Could not save backtest result:', dbErr);
+    }
 
     res.json({ success: true, backtest: result });
   } catch (err: any) {
@@ -258,7 +378,7 @@ app.post('/api/backtest', (req, res) => {
   }
 });
 
-// 6. Get Analysis History
+// 7. Get Analysis History
 app.get('/api/history', (req, res) => {
   try {
     const { limit = 50, symbol, signal } = req.query;
@@ -306,20 +426,25 @@ app.delete('/api/history', (_req, res) => {
   }
 });
 
-// 7. Get Sample OHLC
+// 8. Get Sample OHLC
 app.get('/api/ohlc-sample', (req, res) => {
   const { symbol = 'EUR/USD (OTC)', timeframe = '1M', count = 100 } = req.query;
   const candles = generateSampleOHLC(String(symbol), String(timeframe), Number(count));
   res.json({ success: true, symbol, timeframe, candles });
 });
 
-// 8. User Settings API
+// 9. User Settings API
 app.get('/api/settings', (_req, res) => {
   try {
     const rows = db.prepare('SELECT * FROM user_settings').all() as { key: string; value: string }[];
     const settingsObj: Record<string, string> = {};
     for (const r of rows) {
-      settingsObj[r.key] = r.value;
+      // Redact custom_gemini_key
+      if (r.key === 'custom_gemini_key') {
+        settingsObj['custom_gemini_key'] = r.value ? `${r.value.slice(0, 4)}...${r.value.slice(-4)}` : '';
+      } else {
+        settingsObj[r.key] = r.value;
+      }
     }
     res.json({ success: true, settings: settingsObj });
   } catch (err: any) {
@@ -348,32 +473,6 @@ app.post('/api/settings', (req, res) => {
   }
 });
 
-// 9. Gemini Connection Test
-app.post('/api/test-gemini', async (_req, res) => {
-  try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-      return res.status(400).json({
-        success: false,
-        message: 'GEMINI_API_KEY is missing or unconfigured.',
-      });
-    }
-
-    // Call a simple prompt to verify key
-    const reply = await askVoiceAssistant('Test connection. Respond with "Gemini API Connection Operational".');
-    res.json({
-      success: true,
-      message: 'Gemini API key validated successfully!',
-      sampleResponse: reply,
-    });
-  } catch (err: any) {
-    res.status(500).json({
-      success: false,
-      message: err.message || 'Gemini API validation failed.',
-    });
-  }
-});
-
 // Export Express App for Vite Integration in Server Mode
 export { app };
 
@@ -398,4 +497,3 @@ async function startServer() {
 startServer().catch((err) => {
   console.error('Server startup error:', err);
 });
-

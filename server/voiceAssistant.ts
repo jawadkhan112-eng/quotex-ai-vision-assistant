@@ -1,13 +1,15 @@
 import { GoogleGenAI } from '@google/genai';
+import { getActiveAiConfig } from './apiKeyManager.js';
 
 export async function askVoiceAssistant(
   userQuery: string,
   contextData?: any
 ): Promise<string> {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const aiConfig = getActiveAiConfig();
+  const apiKey = aiConfig.apiKey;
 
-  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-    return 'Voice assistant is ready. However, the Gemini API key is missing. Please add GEMINI_API_KEY to your environment settings.';
+  if (!apiKey) {
+    return 'Voice assistant is ready. However, no AI API key is configured. Please add your key in Settings -> AI/API Configuration.';
   }
 
   const ai = new GoogleGenAI({
@@ -31,7 +33,7 @@ ${JSON.stringify(contextData || {}, null, 2)}`;
 
   try {
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: aiConfig.model || 'gemini-3.8-flash',
       contents: userQuery,
       config: {
         systemInstruction,
@@ -41,6 +43,12 @@ ${JSON.stringify(contextData || {}, null, 2)}`;
     return response.text || 'I analyzed the chart context. Please ask any specific questions about signals or indicators.';
   } catch (err: any) {
     console.error('Voice Assistant Error:', err);
+    if (err.message?.includes('429')) {
+      return 'API quota limit reached (429). Please wait a moment before asking another question.';
+    }
+    if (err.message?.includes('401') || err.message?.includes('API_KEY_INVALID')) {
+      return 'Your saved API key is invalid or expired. Please update your key in Settings -> AI/API Configuration.';
+    }
     return `Assistant Notice: Unable to complete request (${err.message || 'connection issue'}). Please check API key status.`;
   }
 }

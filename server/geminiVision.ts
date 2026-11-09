@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type } from '@google/genai';
+import { getActiveAiConfig } from './apiKeyManager.js';
 
 export interface VisionAnalysisResult {
   signal: 'CALL' | 'PUT' | 'WAIT';
@@ -15,6 +16,8 @@ export interface VisionAnalysisResult {
   missingData: string[];
   invalidation: string;
   riskNotes: string;
+  providerUsed?: string;
+  modelUsed?: string;
 }
 
 export async function analyzeChartImage(
@@ -22,12 +25,14 @@ export async function analyzeChartImage(
   mimeType = 'image/png',
   symbol = 'EUR/USD (OTC)',
   timeframe = '1M',
-  userModel = 'gemini-3.8-flash'
+  userModel?: string
 ): Promise<VisionAnalysisResult> {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const aiConfig = getActiveAiConfig();
+  const apiKey = aiConfig.apiKey;
+  const modelToUse = userModel || aiConfig.model || 'gemini-3.8-flash';
 
-  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-    throw new Error('Gemini API key is missing. Please configure GEMINI_API_KEY in backend environment secrets.');
+  if (!apiKey) {
+    throw new Error('No API key configured. Please enter your Gemini API key in Settings -> AI/API Configuration.');
   }
 
   const ai = new GoogleGenAI({
@@ -62,7 +67,7 @@ Return ONLY a valid JSON object matching the requested schema.`;
 
   try {
     const response = await ai.models.generateContent({
-      model: userModel,
+      model: modelToUse,
       contents: {
         parts: [
           {
@@ -147,17 +152,20 @@ Return ONLY a valid JSON object matching the requested schema.`;
       parsed.signal = 'WAIT';
     }
 
+    parsed.providerUsed = aiConfig.provider;
+    parsed.modelUsed = modelToUse;
+
     return parsed;
   } catch (err: any) {
     console.error('Gemini Vision API Error:', err);
 
-    let userMessage = err.message || 'Vision analysis failed';
+    let userMessage = err.message || 'Vision analysis request failed';
     if (err.status === 429 || err.message?.includes('429')) {
-      userMessage = 'API quota exceeded (429). Please wait or upgrade Gemini API key tier.';
+      userMessage = 'API quota or rate-limit exceeded (429). Please wait a moment or check your API key quota in AI Settings.';
     } else if (err.status === 503 || err.message?.includes('503')) {
-      userMessage = 'Gemini AI service overloaded (503). Please retry in a moment.';
-    } else if (err.status === 401 || err.status === 403 || err.message?.includes('API_KEY_INVALID')) {
-      userMessage = 'Invalid or unauthorized API key. Check Settings > Secrets.';
+      userMessage = 'Gemini AI service capacity overloaded (503). Please retry in a few seconds.';
+    } else if (err.status === 401 || err.status === 403 || err.message?.includes('API_KEY_INVALID') || err.message?.includes('PERMISSION_DENIED')) {
+      userMessage = 'Invalid or unauthorized API key. Please check your key in Settings -> AI/API Configuration.';
     }
 
     throw new Error(userMessage);
