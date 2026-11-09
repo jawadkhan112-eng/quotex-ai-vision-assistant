@@ -1,0 +1,6 @@
+{
+  "name": "Quotex AI Vision Assistant",
+  "description": "Advanced AI-powered Quotex chart vision analysis assistant with technical indicators, candlestick pattern engine, voice assistant, and explainable signal intelligence.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

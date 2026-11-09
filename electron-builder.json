@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
+  "appId": "com.quotex.aivision",
+  "productName": "Quotex AI Vision Assistant",
+  "directories": {
+    "output": "dist-electron"
+  },
+  "files": [
+    "dist/**/*",
+    "dist-server/**/*",
+    "package.json"
+  ],
+  "win": {
+    "target": "nsis",
+    "icon": "public/icon.png"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "Quotex AI Vision Assistant"
+  }
+}
