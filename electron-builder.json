@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
-  "appId": "com.quotex.aivision",
-  "productName": "Quotex AI Vision Assistant",
+  "appId": "com.quotex.algorithmicterminal",
+  "productName": "Quotex Algorithmic Trading Terminal",
   "directories": {
     "output": "dist-electron"
   },
@@ -19,6 +19,6 @@
     "allowToChangeInstallationDirectory": true,
     "createDesktopShortcut": true,
     "createStartMenuShortcut": true,
-    "shortcutName": "Quotex AI Vision Assistant"
+    "shortcutName": "Quotex Algorithmic Trading Terminal"
   }
 }

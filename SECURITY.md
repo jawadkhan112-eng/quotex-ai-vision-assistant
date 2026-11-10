@@ -1,6 +1,7 @@
-# SECURITY & DATA POLICY
+# Security and Data Policy
 
-1. **API Key Isolation**: `GEMINI_API_KEY` is strictly held on the server environment side. It is NEVER exposed to client-side bundles, HTML, or browser JavaScript.
-2. **No Broker Automated Interactions**: The application does not contain auto-clickers, broker login automation, OTP interception, or CAPTCHA bypass routines.
-3. **Electron Security**: Electron main process runs with `contextIsolation: true`, `nodeIntegration: false`, and `sandbox: true`.
-4. **Input Validation & Sanitization**: Image uploads enforce MIME validation, size limits, and sanitization before processing.
+1. **Local calculations only:** The terminal does not accept, store, or transmit API keys and makes no provider/model calls.
+2. **Explicit screen capture:** Browser screen sharing starts only after the user grants permission and stops when the user stops the stream.
+3. **No broker automation:** The application contains no auto-clickers, login automation, OTP interception, CAPTCHA bypass, or trade execution.
+4. **Electron hardening:** Electron uses `contextIsolation: true`, `nodeIntegration: false`, and `sandbox: true`.
+5. **Input validation:** The API requires an array of finite price values and bounds JSON payloads to 8 MB.

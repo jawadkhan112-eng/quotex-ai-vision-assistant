@@ -1,5 +1,5 @@
 /**
- * Robust, production-grade API Client for Quotex AI Vision Assistant.
+ * Small JSON client for the local algorithmic terminal.
  * 
  * Features:
  * - Never blindly calls response.json() on unknown or failing HTTP responses

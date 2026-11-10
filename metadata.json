@@ -1,6 +1,6 @@
 {
-  "name": "Quotex AI Vision Assistant",
-  "description": "Advanced AI-powered Quotex chart vision analysis assistant with technical indicators, candlestick pattern engine, voice assistant, and explainable signal intelligence.",
+  "name": "Quotex Algorithmic Trading Terminal",
+  "description": "Local deterministic Quotex technical-analysis terminal with RSI, Bollinger, candle, and pixel diagnostics.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": ["MAJOR_CAPABILITY_LOCAL_ALGORITHMIC_ANALYSIS"]
 }

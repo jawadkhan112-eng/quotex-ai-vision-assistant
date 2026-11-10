@@ -13,7 +13,7 @@ function createWindow() {
     height: 900,
     minWidth: 1024,
     minHeight: 700,
-    title: 'Quotex AI Vision Assistant',
+    title: 'Quotex Algorithmic Trading Terminal',
     backgroundColor: '#020617',
     icon: path.join(__dirname, '../public/icon.png'),
     webPreferences: {

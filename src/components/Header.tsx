@@ -74,7 +74,7 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Strict Analysis-Only Badge */}
         <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[11px] font-medium">
           <ShieldAlert className="w-3.5 h-3.5" />
-          <span>ANALYSIS ONLY · NON-AUTOMATED ASSISTANT</span>
+          <span>ANALYSIS ONLY · LOCAL MATH ENGINE</span>
         </div>
 
         {/* Backend Status */}

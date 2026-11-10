@@ -13,11 +13,11 @@ if (!fs.existsSync(DB_DIR)) {
   }
 }
 
-const DB_PATH = path.join(DB_DIR, 'quotex_vision.db');
+const DB_PATH = path.join(DB_DIR, 'quotex_algorithmic.db');
 
 export const db = new Database(DB_PATH);
 
-// Initialize Database Schema with support for multi-provider credentials & OTCharts cache
+// Local terminal storage. No credentials or provider configuration are persisted.
 export function initDb() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS analysis_history (
@@ -39,23 +39,12 @@ export function initDb() {
       invalidation TEXT,
       risk_notes TEXT,
       image_path TEXT,
-      model_used TEXT NOT NULL,
       notes TEXT
     );
 
     CREATE TABLE IF NOT EXISTS user_settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS provider_credentials (
-      id TEXT PRIMARY KEY,
-      provider TEXT NOT NULL,
-      model TEXT NOT NULL,
-      encrypted_key TEXT NOT NULL,
-      custom_endpoint TEXT,
-      is_active INTEGER NOT NULL DEFAULT 0,
-      updated_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS backtest_results (
@@ -89,14 +78,9 @@ export function initDb() {
 
   // Insert default settings if missing
   const setStmt = db.prepare('INSERT OR IGNORE INTO user_settings (key, value) VALUES (?, ?)');
-  setStmt.run('ai_provider', 'gemini');
-  setStmt.run('model_name', 'gemini-2.5-flash');
   setStmt.run('default_symbol', 'EUR/USD (OTC)');
   setStmt.run('default_timeframe', '1M');
-  setStmt.run('auto_save_screenshots', 'true');
-  setStmt.run('evidence_threshold', '65');
   setStmt.run('theme', 'dark');
-  setStmt.run('market_data_provider', 'otcharts');
 }
 
 initDb();
