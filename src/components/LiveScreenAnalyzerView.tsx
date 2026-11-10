@@ -73,6 +73,14 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
     ? '🧮 Non-AI Algorithmic Math Engine'
     : '🤖 AI Vision Mode';
 
+// --- Algorithmic Mode Action Buttons ---
+  const algoButtonClass = mode === 'algorithmic'
+    ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+    : 'bg-slate-600 text-slate-200 hover:bg-slate-500';
+  const aiButtonClass = mode === 'algorithmic'
+    ? 'bg-slate-600 text-slate-200 hover:bg-slate-500'
+    : 'bg-emerald-600 text-white hover:bg-emerald-700';
+
   const [lastFrameTimestamp, setLastFrameTimestamp] = useState<string | null>(null);
   const [lastAnalysisTimestamp, setLastAnalysisTimestamp] = useState<string | null>(null);
 
