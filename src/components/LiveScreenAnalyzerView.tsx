@@ -25,6 +25,9 @@ import { SignalData, MonitoringLogEntry } from '../types';
 interface LiveScreenAnalyzerViewProps {
   selectedSymbol: string;
   selectedTimeframe: string;
+  // User-selected AI provider & model (strict model lock — honored by backend)
+  aiProvider: string;
+  aiModel: string;
   onAnalysisComplete: (result: SignalData) => void;
   // Notifies the parent when the vision engine auto-detects the asset/timeframe
   // from the chart UI headers, so manual inputs can be superseded.
@@ -35,6 +38,8 @@ interface LiveScreenAnalyzerViewProps {
 export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
   selectedSymbol,
   selectedTimeframe,
+  aiProvider,
+  aiModel,
   onAnalysisComplete,
   onAssetTimeframeDetected,
   geminiConnected,
@@ -257,6 +262,8 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
           body: JSON.stringify({
             symbol: selectedSymbol,
             timeframe: selectedTimeframe,
+            provider: aiProvider,
+            model: aiModel,
             base64Image: frameData,
           }),
         });

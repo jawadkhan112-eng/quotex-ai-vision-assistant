@@ -19,6 +19,9 @@ import { safeFetch } from '../apiClient';
 interface ScreenshotAnalyzerViewProps {
   selectedSymbol: string;
   selectedTimeframe: string;
+  // User-selected AI provider & model (strict model lock — honored by backend)
+  aiProvider: string;
+  aiModel: string;
   onAnalysisComplete: (result: SignalData) => void;
   geminiConnected: boolean;
 }
@@ -26,6 +29,8 @@ interface ScreenshotAnalyzerViewProps {
 export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
   selectedSymbol,
   selectedTimeframe,
+  aiProvider,
+  aiModel,
   onAnalysisComplete,
   geminiConnected,
 }) => {
@@ -150,6 +155,8 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
         body: JSON.stringify({
           symbol: selectedSymbol,
           timeframe: selectedTimeframe,
+          provider: aiProvider,
+          model: aiModel,
           base64Image: imagePreview,
         }),
       });

@@ -174,30 +174,28 @@ export async function analyzeChartImage(
   // Clean base64 payload
   const cleanBase64 = base64Image.replace(/^data:image\/\w+;base64,/, '');
 
-  // 2. Multi-Provider Failover Pipeline: Primary -> Backup Provider
+  // 2. Strict user-selected provider lock: only the explicitly chosen provider is queried.
+  // Cross-provider backup failover is disabled by default. An explicit backupProvider
+  // configured in AI Settings is the only allowed fallback.
   const attemptProviders: Array<{ provider: string; model: string; key: string }> = [];
 
   if (primaryApiKey) {
     attemptProviders.push({ provider: primaryProvider, model: primaryModel, key: primaryApiKey });
   }
 
-  // Backup provider resolution (Groq, OpenRouter, or Gemini)
-  const candidateBackups = ['gemini', 'groq', 'openrouter'].filter((p) => p !== primaryProvider);
-  if (aiConfig.backupProvider && candidateBackups.includes(aiConfig.backupProvider)) {
-    // Put configured backup provider first in fallback list
-    candidateBackups.sort((a, b) => (a === aiConfig.backupProvider ? -1 : b === aiConfig.backupProvider ? 1 : 0));
-  }
-
-  for (const bProvider of candidateBackups) {
-    const bConfig = getActiveAiConfig(bProvider);
+  // Optional explicit backup provider (only when user has configured one in AI Settings)
+  if (aiConfig.backupProvider && aiConfig.backupProvider !== primaryProvider) {
+    const bConfig = getActiveAiConfig(aiConfig.backupProvider);
     if (bConfig.apiKey) {
-      const bNorm = normalizeAiModel(bConfig.model, bProvider);
-      attemptProviders.push({ provider: bProvider, model: bNorm.model, key: bConfig.apiKey });
+      const bNorm = normalizeAiModel(bConfig.model || '', aiConfig.backupProvider);
+      if (bNorm.isVisionSupported) {
+        attemptProviders.push({ provider: aiConfig.backupProvider, model: bNorm.model, key: bConfig.apiKey });
+      }
     }
   }
 
   if (attemptProviders.length === 0) {
-    throw new Error(`No AI API key found for '${primaryProvider}' or backup providers. Please add an API key in AI Settings or environment variables.`);
+    throw new Error(`No AI API key found for '${primaryProvider}'. Please add an API key in AI Settings or environment variables.`);
   }
 
   let lastError: any = null;

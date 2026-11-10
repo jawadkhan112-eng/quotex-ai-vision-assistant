@@ -184,31 +184,19 @@ export function normalizeAiModel(rawModel?: string, rawProvider?: string): Norma
 export function getProviderModelCandidates(provider: string, primaryModel?: string): string[] {
   const p = (provider || '').toLowerCase();
   if (p === 'gemini') {
-    return Array.from(new Set([
-      primaryModel,
-      'gemini-2.5-flash',
-      'gemini-3.8-flash',
-      'gemini-3-flash-preview',
-      'gemini-2.5-pro',
-      'gemini-1.5-flash',
-    ])).filter((m): m is string => Boolean(m && !m.includes('1.5-pro') && !m.includes('2.0-flash')));
+    // Strict user-selected model lock: return only the exact selected model.
+    // No intra-provider fallback to alternate Gemini models.
+    return primaryModel ? [primaryModel] : [];
   }
 
   if (p === 'groq') {
-    return Array.from(new Set([
-      primaryModel,
-      'llama-3.2-11b-vision-preview',
-      'llama-3.2-90b-vision-preview',
-    ])).filter((m): m is string => Boolean(m));
+    // Strict user-selected model lock: return only the exact selected model.
+    return primaryModel ? [primaryModel] : [];
   }
 
   if (p === 'openrouter') {
-    return Array.from(new Set([
-      primaryModel,
-      'meta-llama/llama-3.2-11b-vision-instruct:free',
-      'google/gemini-2.5-flash',
-      'openai/gpt-4o',
-    ])).filter((m): m is string => Boolean(m && !m.includes('anthropic/claude-3.5-sonnet')));
+    // Strict user-selected model lock: return only the exact selected model.
+    return primaryModel ? [primaryModel] : [];
   }
 
   return primaryModel ? [primaryModel] : [];

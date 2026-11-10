@@ -43,16 +43,31 @@ describe('Universal AI Router & Dynamic Model Mapping Tests', () => {
     expect(groqVision.model).toBe('llama-3.2-11b-vision-preview');
   });
 
-  it('generates prioritized candidate lists excluding defunct models', () => {
-    const candidates = getProviderModelCandidates('gemini', 'gemini-1.5-pro');
-    expect(candidates).not.toContain('gemini-1.5-pro');
-    expect(candidates).not.toContain('gemini-2.0-flash');
-    expect(candidates).toContain('gemini-2.5-flash');
-    expect(candidates).toContain('gemini-3.8-flash');
+  it('returns only the user-selected model (strict model lock, no intra-provider cascade)', () => {
+    // Strict lock: gemini returns only the exact selected model
+    const geminiCandidates = getProviderModelCandidates('gemini', 'gemini-3.8-flash');
+    expect(geminiCandidates).toEqual(['gemini-3.8-flash']);
+    expect(geminiCandidates).not.toContain('gemini-1.5-pro');
+    expect(geminiCandidates).not.toContain('gemini-2.0-flash');
+    expect(geminiCandidates).not.toContain('gemini-2.5-flash');
 
-    const openRouterCandidates = getProviderModelCandidates('openrouter');
+    // Strict lock: groq returns only the exact selected model
+    const groqCandidates = getProviderModelCandidates('groq', 'llama-3.2-11b-vision-preview');
+    expect(groqCandidates).toEqual(['llama-3.2-11b-vision-preview']);
+
+    // Strict lock: openrouter returns only the exact selected model
+    const openRouterCandidates = getProviderModelCandidates(
+      'openrouter',
+      'meta-llama/llama-3.2-11b-vision-instruct:free'
+    );
+    expect(openRouterCandidates).toEqual(['meta-llama/llama-3.2-11b-vision-instruct:free']);
     expect(openRouterCandidates).not.toContain('anthropic/claude-3.5-sonnet');
-    expect(openRouterCandidates).toContain('meta-llama/llama-3.2-11b-vision-instruct:free');
+    expect(openRouterCandidates).not.toContain('google/gemini-2.5-flash');
+    expect(openRouterCandidates).not.toContain('openai/gpt-4o');
+
+    // No primary model → empty list (no implicit fallback)
+    expect(getProviderModelCandidates('gemini')).toEqual([]);
+    expect(getProviderModelCandidates('openrouter')).toEqual([]);
   });
 
   it('accurately identifies failover-eligible errors (404, 503, 429)', () => {

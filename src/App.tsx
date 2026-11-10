@@ -17,6 +17,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('live_screen');
   const [selectedSymbol, setSelectedSymbol] = useState('EUR/USD (OTC)');
   const [selectedTimeframe, setSelectedTimeframe] = useState('1M');
+  const [aiProvider, setAiProvider] = useState<string>('gemini');
+  const [aiModel, setAiModel] = useState<string>('gemini-2.5-flash');
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [backendHealthy, setBackendHealthy] = useState(false);
   const [geminiConnected, setGeminiConnected] = useState(false);
@@ -58,8 +60,23 @@ export default function App() {
     }
   };
 
+  // Fetch the user-selected AI provider/model so the strict model lock can be honored
+  const fetchAiConfig = async () => {
+    try {
+      const data = await safeFetch<any>('/api/ai-config');
+      if (data && data.success) {
+        setAiProvider(data.provider || 'gemini');
+        setAiModel(data.model || 'gemini-2.5-flash');
+      }
+    } catch (err) {
+      // Keep defaults if config endpoint is unavailable
+      console.warn('Could not fetch AI provider config:', err);
+    }
+  };
+
   useEffect(() => {
     checkHealth();
+    fetchAiConfig();
     const interval = setInterval(checkHealth, 15000);
     return () => clearInterval(interval);
   }, []);
@@ -91,6 +108,8 @@ export default function App() {
             <LiveScreenAnalyzerView
               selectedSymbol={selectedSymbol}
               selectedTimeframe={selectedTimeframe}
+              aiProvider={aiProvider}
+              aiModel={aiModel}
               onAnalysisComplete={setLatestSignal}
               onAssetTimeframeDetected={handleAssetTimeframeDetected}
               geminiConnected={geminiConnected}
@@ -101,6 +120,8 @@ export default function App() {
             <ScreenshotAnalyzerView
               selectedSymbol={selectedSymbol}
               selectedTimeframe={selectedTimeframe}
+              aiProvider={aiProvider}
+              aiModel={aiModel}
               onAnalysisComplete={setLatestSignal}
               geminiConnected={geminiConnected}
             />
