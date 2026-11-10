@@ -111,8 +111,8 @@ export function normalizeAiModel(rawModel?: string, rawProvider?: string): Norma
     };
   }
 
-  // 3. Groq Cloud Normalization
-  if (provider === 'groq' || model.toLowerCase().includes('llama') || model.toLowerCase().includes('mixtral')) {
+  // 3. Groq Cloud Normalization (all Groq models must use provider 'groq')
+  if (provider === 'groq') {
     const lower = model.toLowerCase();
     if (lower.includes('vision') || lower.includes('11b') || lower.includes('90b')) {
       return {
@@ -131,11 +131,12 @@ export function normalizeAiModel(rawModel?: string, rawProvider?: string): Norma
         normalizedName: 'Llama 3.3 70B Versatile',
       };
     }
+    // Unknown Groq model: honor user's exact selection (mark as text-only by default)
     return {
       provider: 'groq',
-      model: 'llama-3.2-11b-vision-preview',
-      isVisionSupported: true,
-      normalizedName: 'Llama 3.2 11B Vision',
+      model,
+      isVisionSupported: false,
+      normalizedName: `Groq (${model})`,
     };
   }
 
@@ -158,6 +159,54 @@ export function normalizeAiModel(rawModel?: string, rawProvider?: string): Norma
     };
   }
 
+  // 5. DeepSeek
+  // Created to support reasoning models from the DeepSeek API.
+  if (provider === 'deepseek' || model.toLowerCase().includes('deepseek')) {
+    const lower = model.toLowerCase();
+    if (lower.includes('deepseek-chat')) {
+      return {
+        provider: 'deepseek',
+        model: 'deepseek-chat',
+        isVisionSupported: false,
+        normalizedName: 'DeepSeek Chat (V3)',
+      };
+    }
+    if (lower.includes('deepseek-reasoner')) {
+      return {
+        provider: 'deepseek',
+        model: 'deepseek-reasoner',
+        isVisionSupported: false,
+        normalizedName: 'DeepSeek R1 (Reasoner)',
+      };
+    }
+    return {
+      provider: 'deepseek',
+      model,
+      isVisionSupported: false,
+      normalizedName: `DeepSeek (${model})`,
+    };
+  }
+
+  // 6. Ollama (Local)
+  // Self-hosted local models with zero external API calls.
+  if (provider === 'ollama' || model.toLowerCase().includes('ollama')) {
+    const lower = model.toLowerCase();
+    if (lower.includes('vision')) {
+      return {
+        provider: 'ollama',
+        model: 'llama3.2-vision',
+        isVisionSupported: true,
+        normalizedName: 'Llama 3.2 Vision (Local Vision)',
+      };
+    }
+    return {
+      provider: 'ollama',
+      model,
+      isVisionSupported: false,
+      normalizedName: `Ollama (${model})`,
+    };
+  }
+
   // 5. Anthropic Direct
   if (provider === 'anthropic') {
     return {
@@ -168,12 +217,13 @@ export function normalizeAiModel(rawModel?: string, rawProvider?: string): Norma
     };
   }
 
-  // Fallback default
+  // Unrecognized provider or model: honor the user's exact selection.
+  // Do NOT silently overwrite with a hardcoded default model (e.g. gemini-2.5-flash).
   return {
-    provider: 'gemini',
-    model: 'gemini-2.5-flash',
-    isVisionSupported: true,
-    normalizedName: 'Gemini 2.5 Flash',
+    provider,
+    model,
+    isVisionSupported: false,
+    normalizedName: model || provider || 'Unknown Model',
   };
 }
 
@@ -200,6 +250,11 @@ export function getProviderModelCandidates(provider: string, primaryModel?: stri
   }
 
   return primaryModel ? [primaryModel] : [];
+}
+
+/**\n * Determines if a selected model supports multimodal image/video input.\n * Returns true only for models whose catalog entry has vision: true.\n */
+export function isVisionModel(modelSelection: NormalizedModelSelection): boolean {
+  return modelSelection.isVisionSupported === true;
 }
 
 /**

@@ -1,6 +1,6 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import { getActiveAiConfig, PROVIDER_CATALOG } from './apiKeyManager.js';
-import { normalizeAiModel, getProviderModelCandidates, isFailoverEligibleError } from './aiRouter.js';
+import { normalizeAiModel, getProviderModelCandidates, isFailoverEligibleError, isVisionModel } from './aiRouter.js';
 
 export interface VisionAnalysisResult {
   signal: 'CALL' | 'PUT' | 'WAIT';
@@ -166,9 +166,15 @@ export async function analyzeChartImage(
   const primaryProvider = normalized.provider;
   let primaryModel = normalized.model;
 
-  // If selected model is text-only, automatically re-route to standard vision model of the SAME provider
-  if (!normalized.isVisionSupported) {
-    console.warn(`[AI Router] Model '${rawModel}' on '${rawProvider}' is text-only. Re-routing to vision model '${primaryModel}' on same provider.`);
+  // 2. Vision Capability Validation: text-only models cannot analyse images.
+  // If the user selected a non-vision model (e.g. DeepSeek V3), return a clear,
+  // user-friendly error to the UI instead of sending the image to a text model
+  // or silently falling back to a different provider.
+  if (!isVisionModel(normalized)) {
+    throw new Error(
+      `Selected model '${normalized.model}' on '${normalized.provider}' does not support vision/input images. ` +
+      `Please select a vision-capable model (e.g. Gemini 2.5 Flash, Gemini 3.8 Flash, Llama 3.2 Vision, GPT-4o)`
+    );
   }
 
   const primaryApiKey = aiConfig.provider === primaryProvider ? aiConfig.apiKey : getActiveAiConfig(primaryProvider, userApiKey).apiKey;

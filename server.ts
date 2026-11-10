@@ -230,7 +230,7 @@ app.post('/api/analyze-vision', upload.single('screenshot'), async (req, res) =>
 
     const aiConfig = getActiveAiConfig(provider);
     const providerToUse = provider || aiConfig.provider;
-    const modelToUse = model || aiConfig.model || (providerToUse === 'gemini' ? 'gemini-2.5-flash' : 'llama-3.2-11b-vision-preview');
+    const modelToUse = model || aiConfig.model;
 
     // 1. Run Pure Vision Analysis on Shared Screen / Screenshot
     const visionOutput = await analyzeChartImage(imageBuffer, mimeType, symbol, timeframe, modelToUse, providerToUse, apiKey);

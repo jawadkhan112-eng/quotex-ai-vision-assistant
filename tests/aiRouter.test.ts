@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeAiModel, getProviderModelCandidates, isFailoverEligibleError } from '../server/aiRouter';
+import { normalizeAiModel, getProviderModelCandidates, isFailoverEligibleError, isVisionModel } from '../server/aiRouter';
 
 describe('Universal AI Router & Dynamic Model Mapping Tests', () => {
   it('maps legacy and unsupported Gemini models to active flash endpoints', () => {
@@ -77,5 +77,59 @@ describe('Universal AI Router & Dynamic Model Mapping Tests', () => {
     expect(isFailoverEligibleError(new Error('models/gemini-1.5-pro is not found for API version v1beta'))).toBe(true);
     expect(isFailoverEligibleError(new Error('The model anthropic/claude-3.5-sonnet is no longer available'))).toBe(true);
     expect(isFailoverEligibleError(new Error('SyntaxError: unexpected token'))).toBe(false);
+  });
+});
+
+describe('Strict User-Selected Model Lock & Vision Validation Tests', () => {
+  it('preserves the user-selected model for unrecognized providers (no hardcoded fallback)', () => {
+    // DeepSeek must be preserved exactly as selected, NOT silently mapped to gemini-2.5-flash
+    const deepseek = normalizeAiModel('deepseek-chat', 'deepseek');
+    expect(deepseek.model).toBe('deepseek-chat');
+    expect(deepseek.provider).toBe('deepseek');
+    expect(deepseek.isVisionSupported).toBe(false);
+
+    const deepseekReasoner = normalizeAiModel('deepseek-reasoner', 'deepseek');
+    expect(deepseekReasoner.model).toBe('deepseek-reasoner');
+    expect(deepseekReasoner.isVisionSupported).toBe(false);
+
+    // Ollama
+    const ollamaVision = normalizeAiModel('llama3.2-vision', 'ollama');
+    expect(ollamaVision.model).toBe('llama3.2-vision');
+    expect(ollamaVision.isVisionSupported).toBe(true);
+  });
+
+  it('returns the user-selected model for OpenRouter and Groq without hardcoded defaults', () => {
+    const openRouterDeepSeek = normalizeAiModel('deepseek/deepseek-chat', 'openrouter');
+    expect(openRouterDeepSeek.model).toBe('deepseek/deepseek-chat');
+    expect(openRouterDeepSeek.isVisionSupported).toBe(false);
+
+    const groqMixtral = normalizeAiModel('mixtral-8x7b', 'groq');
+    expect(groqMixtral.model).toBe('mixtral-8x7b');
+    expect(groqMixtral.isVisionSupported).toBe(false);
+  });
+
+  it('preserves user-selected Gemini models exactly (no silent rewrite to gemini-2.5-flash)', () => {
+    // If a user explicitly selects gemini-3.8-flash, it must NOT be rewritten to gemini-2.5-flash
+    const gemini38 = normalizeAiModel('gemini-3.8-flash', 'gemini');
+    expect(gemini38.model).toBe('gemini-3.8-flash');
+
+    const gemini25 = normalizeAiModel('gemini-2.5-flash', 'gemini');
+    expect(gemini25.model).toBe('gemini-2.5-flash');
+  });
+
+  it('isVisionModel returns true only for vision-capable models', () => {
+    expect(isVisionModel(normalizeAiModel('gemini-3.8-flash', 'gemini'))).toBe(true);
+    expect(isVisionModel(normalizeAiModel('gemini-2.5-flash', 'gemini'))).toBe(true);
+    expect(isVisionModel(normalizeAiModel('deepseek-chat', 'deepseek'))).toBe(false);
+    expect(isVisionModel(normalizeAiModel('deepseek-reasoner', 'deepseek'))).toBe(false);
+    expect(isVisionModel(normalizeAiModel('llama3.2-vision', 'ollama'))).toBe(true);
+    expect(isVisionModel(normalizeAiModel('llama3.1', 'ollama'))).toBe(false);
+    expect(isVisionModel(normalizeAiModel('gpt-4o', 'openai'))).toBe(true);
+  });
+
+  it('returns a clear error when a text-only model is used for image analysis', () => {
+    const textOnly = normalizeAiModel('deepseek-chat', 'deepseek');
+    const result = isVisionModel(textOnly);
+    expect(result).toBe(false);
   });
 });
