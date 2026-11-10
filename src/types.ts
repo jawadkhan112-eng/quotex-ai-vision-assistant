@@ -66,6 +66,15 @@ export interface SignalData {
   modelUsed?: string;
 }
 
+export interface AlgoAnalysisResult {
+  signal: 'CALL' | 'PUT' | 'WAIT';
+  confidenceScore: number; // 0-100% confidence based on technical confluence
+  reasoning: string; // Mathematical reasoning for the signal
+  rsiValue?: number; // RSI 14-period value
+  bbPosition?: 'lower' | 'upper' | 'neutral'; // Bollinger Band position
+  candleObservation?: string; // e.g., "Price below Lower BB + RSI oversold"
+}
+
 export interface HistoryRecord {
   id: number;
   timestamp: string;

@@ -20,7 +20,7 @@ import {
   FileText,
   ListChecks,
 } from 'lucide-react';
-import { SignalData, MonitoringLogEntry } from '../types';
+import { SignalData, MonitoringLogEntry, AlgoAnalysisResult } from '../types';
 
 interface LiveScreenAnalyzerViewProps {
   selectedSymbol: string;
@@ -53,6 +53,26 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
   const [streamPaused, setStreamPaused] = useState(false);
   const [autoAnalysisActive, setAutoAnalysisActive] = useState(false);
   const [analysisInterval, setAnalysisInterval] = useState<number>(10); // Default 10 seconds
+
+  // --- Mode Toggle State ---
+  const [mode, setMode] = useState<'ai' | 'algorithmic'>('ai'); // 'ai' or 'algorithmic'
+  const [algorithmicResult, setAlgorithmicResult] = useState<AlgoAnalysisResult | null>(null);
+
+  // When mode changes, reset algorithmic result state
+  useEffect(() => {
+    if (mode === 'algorithmic') {
+      setAlgorithmicResult(null);
+    }
+  }, [mode]);
+
+  // --- Mode Toggle UI ---
+  const modeToggleClass = mode === 'algorithmic'
+    ? 'bg-emerald-600 text-white'
+    : 'bg-slate-600 text-slate-200';
+  const modeToggleLabel = mode === 'algorithmic'
+    ? '🧮 Non-AI Algorithmic Math Engine'
+    : '🤖 AI Vision Mode';
+
   const [lastFrameTimestamp, setLastFrameTimestamp] = useState<string | null>(null);
   const [lastAnalysisTimestamp, setLastAnalysisTimestamp] = useState<string | null>(null);
 
