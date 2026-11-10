@@ -28,23 +28,32 @@ export function normalizeAiModel(rawModel?: string, rawProvider?: string): Norma
   const model = (rawModel || '').trim();
 
   // 1. Google Gemini Normalization
-  // Note: gemini-1.5-pro and outdated v1beta paths throw 404. We automatically upgrade to gemini-2.5-flash or gemini-2.0-flash.
+  // Note: gemini-2.0-flash and gemini-1.5-pro are deprecated/unavailable on newer endpoints.
+  // We automatically upgrade/map requests to active, supported models: gemini-3.8-flash, gemini-3-flash-preview, or gemini-2.5-flash.
   if (provider === 'gemini') {
     const lower = model.toLowerCase();
-    if (lower.includes('1.5-pro') || lower.includes('pro')) {
+    if (lower.includes('3.8-flash') || lower.includes('3.8')) {
       return {
         provider: 'gemini',
-        model: 'gemini-2.5-flash', // Fall back from defunct/unsupported 1.5-pro to high-speed 2.5-flash
+        model: 'gemini-3.8-flash',
+        isVisionSupported: true,
+        normalizedName: 'Gemini 3.8 Flash (Latest Preview)',
+      };
+    }
+    if (lower.includes('2.0-flash') || lower.includes('2.0') || lower.includes('1.5-pro') || lower.includes('pro')) {
+      return {
+        provider: 'gemini',
+        model: 'gemini-2.5-flash', // Seamlessly map deprecated 2.0-flash and 1.5-pro to stable 2.5-flash
         isVisionSupported: true,
         normalizedName: 'Gemini 2.5 Flash',
       };
     }
-    if (lower.includes('2.0-flash') || lower.includes('2.0')) {
+    if (lower.includes('2.5-flash') || lower.includes('2.5')) {
       return {
         provider: 'gemini',
-        model: 'gemini-2.0-flash',
+        model: 'gemini-2.5-flash',
         isVisionSupported: true,
-        normalizedName: 'Gemini 2.0 Flash',
+        normalizedName: 'Gemini 2.5 Flash',
       };
     }
     // Default to latest active Gemini flash model
@@ -178,10 +187,11 @@ export function getProviderModelCandidates(provider: string, primaryModel?: stri
     return Array.from(new Set([
       primaryModel,
       'gemini-2.5-flash',
-      'gemini-2.0-flash',
+      'gemini-3.8-flash',
+      'gemini-3-flash-preview',
+      'gemini-2.5-pro',
       'gemini-1.5-flash',
-      'gemini-1.5-flash-latest',
-    ])).filter((m): m is string => Boolean(m && !m.includes('1.5-pro')));
+    ])).filter((m): m is string => Boolean(m && !m.includes('1.5-pro') && !m.includes('2.0-flash')));
   }
 
   if (p === 'groq') {

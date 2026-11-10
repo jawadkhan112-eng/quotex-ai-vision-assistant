@@ -52,9 +52,9 @@ export const PROVIDER_CATALOG: ProviderDefinition[] = [
     apiKeyFallback: BUILTIN_KEYS.gemini,
     supportedModels: [
       { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Latest High-Speed Vision · Default)', vision: true },
-      { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash (Next-Gen Ultra Fast · Active)', vision: true },
+      { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash (Ultra Fast · Active)', vision: true },
+      { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash (Next-Gen Preview)', vision: true },
       { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (Deep Technical Reasoner)', vision: true },
-      { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash (Legacy Fast Vision)', vision: true },
     ],
   },
   {

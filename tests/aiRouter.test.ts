@@ -8,10 +8,15 @@ describe('Universal AI Router & Dynamic Model Mapping Tests', () => {
     expect(proMapping.model).toBe('gemini-2.5-flash');
     expect(proMapping.isVisionSupported).toBe(true);
 
-    // gemini-2.0-flash should be preserved
+    // gemini-2.0-flash should be safely mapped to gemini-2.5-flash
     const flash20 = normalizeAiModel('gemini-2.0-flash', 'gemini');
-    expect(flash20.model).toBe('gemini-2.0-flash');
+    expect(flash20.model).toBe('gemini-2.5-flash');
     expect(flash20.isVisionSupported).toBe(true);
+
+    // gemini-3.8-flash should be recognized and preserved
+    const flash38 = normalizeAiModel('gemini-3.8-flash', 'gemini');
+    expect(flash38.model).toBe('gemini-3.8-flash');
+    expect(flash38.isVisionSupported).toBe(true);
 
     // default gemini fallback
     const defaultGemini = normalizeAiModel('', 'gemini');
@@ -41,8 +46,9 @@ describe('Universal AI Router & Dynamic Model Mapping Tests', () => {
   it('generates prioritized candidate lists excluding defunct models', () => {
     const candidates = getProviderModelCandidates('gemini', 'gemini-1.5-pro');
     expect(candidates).not.toContain('gemini-1.5-pro');
+    expect(candidates).not.toContain('gemini-2.0-flash');
     expect(candidates).toContain('gemini-2.5-flash');
-    expect(candidates).toContain('gemini-2.0-flash');
+    expect(candidates).toContain('gemini-3.8-flash');
 
     const openRouterCandidates = getProviderModelCandidates('openrouter');
     expect(openRouterCandidates).not.toContain('anthropic/claude-3.5-sonnet');
