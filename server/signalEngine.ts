@@ -38,6 +38,11 @@ export interface FinalSignalResult {
   disclaimer: string;
   providerUsed?: string;
   modelUsed?: string;
+  // Pre-Close / Candle-Close Timing (Sure-Shot Edge)
+  preCloseSignal?: boolean;
+  candleCompletionStatus?: string;
+  secondsToClose?: number;
+  volatilityAssessment?: string;
 }
 
 /**
@@ -210,15 +215,39 @@ export function generateVisualConfirmationSignal(
   let finalSignal: 'CALL' | 'PUT' | 'WAIT' = 'WAIT';
   let summaryReason = '';
 
-  if (visionResult.signal === 'CALL' && passedCount >= 3 && opposingEvidence.length <= 2 && conflictingEvidence.length === 0) {
+  // Extract candle-close / pre-close timing cues from vision (Sure-Shot Edge)
+  const candleCompletionStatus = visionResult.candleCompletionStatus || 'UNKNOWN';
+  const secondsToClose = visionResult.candleCloseSecondsRemaining ?? undefined;
+  const nextCandleDirection = visionResult.nextCandleDirection || 'WAIT';
+  const preCloseSignal = Boolean(visionResult.preCloseSignal);
+  const volatilityAssessment = visionResult.volatilityAssessment || 'NORMAL';
+
+  // Strict risk override: HIGH volatility forces WAIT regardless of setup quality
+  let volatilityForcedWait = false;
+  if (volatilityAssessment === 'HIGH') {
+    volatilityForcedWait = true;
+    finalSignal = 'WAIT';
+    summaryReason = `WAIT: High market volatility detected (${visionResult.rejectionAnalysis || 'choppy price action with no clear absorption zone'}). No high-probability entry — stand aside until volatility settles.`;
+    riskNotes.push('High volatility environment: avoid entering until candle structure stabilizes.');
+  }
+
+  if (!volatilityForcedWait && visionResult.signal === 'CALL' && passedCount >= 3 && opposingEvidence.length <= 2 && conflictingEvidence.length === 0) {
     finalSignal = 'CALL';
     summaryReason = `CALL verified: ${passedCount} visual confirmations passed (Trend, Candle Anatomy, and Momentum aligned).`;
     supportingEvidence.push(...(visionResult.reasons || ['Bullish candle structure with rejection off support']));
-  } else if (visionResult.signal === 'PUT' && passedCount >= 3 && opposingEvidence.length <= 2 && conflictingEvidence.length === 0) {
+    if (preCloseSignal && candleCompletionStatus === 'APPROACHING_CLOSE' && secondsToClose != null && secondsToClose <= 15) {
+      summaryReason += ` Sure-Shot pre-close entry: current candle closing in ${secondsToClose}s — execute at the next ${requestedTimeframe} candle open.`;
+      riskNotes.push(`Pre-close sure-shot window (${secondsToClose}s remaining). Enter exactly at next candle open.`);
+    }
+  } else if (!volatilityForcedWait && visionResult.signal === 'PUT' && passedCount >= 3 && opposingEvidence.length <= 2 && conflictingEvidence.length === 0) {
     finalSignal = 'PUT';
     summaryReason = `PUT verified: ${passedCount} visual confirmations passed (Trend, Candle Anatomy, and Momentum aligned).`;
     supportingEvidence.push(...(visionResult.reasons || ['Bearish candle structure with rejection off resistance']));
-  } else {
+    if (preCloseSignal && candleCompletionStatus === 'APPROACHING_CLOSE' && secondsToClose != null && secondsToClose <= 15) {
+      summaryReason += ` Sure-Shot pre-close entry: current candle closing in ${secondsToClose}s — execute at the next ${requestedTimeframe} candle open.`;
+      riskNotes.push(`Pre-close sure-shot window (${secondsToClose}s remaining). Enter exactly at next candle open.`);
+    }
+  } else if (!volatilityForcedWait) {
     finalSignal = 'WAIT';
     if (conflictingEvidence.length > 0) {
       summaryReason = `WAIT: Conflicting visual evidence detected (${conflictingEvidence.join('; ')}).`;
@@ -263,7 +292,7 @@ export function generateVisualConfirmationSignal(
     opposingEvidence,
     conflictingEvidence,
     entryTimingGuidance: entryTiming,
-    nextCandleExpiryEstimate: visionResult.expiryEstimate || nextCandleExpiry,
+    nextCandleExpiryEstimate: visionResult.expiry || visionResult.expiryEstimate || nextCandleExpiry,
     invalidationConditions: invalidation,
     confirmationChecklist: checklist,
     visionInsights: visionResult,
@@ -271,6 +300,11 @@ export function generateVisualConfirmationSignal(
     disclaimer: 'Analysis-only assistant. Evidence score represents visual technical confluence, NOT a guaranteed win rate or profit guarantee.',
     providerUsed: visionResult.providerUsed,
     modelUsed: visionResult.modelUsed,
+    // Pre-Close / Candle-Close Timing (Sure-Shot Edge)
+    preCloseSignal,
+    candleCompletionStatus,
+    secondsToClose,
+    volatilityAssessment,
   };
 }
 

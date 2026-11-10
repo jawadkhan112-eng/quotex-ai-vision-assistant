@@ -26,6 +26,9 @@ interface LiveScreenAnalyzerViewProps {
   selectedSymbol: string;
   selectedTimeframe: string;
   onAnalysisComplete: (result: SignalData) => void;
+  // Notifies the parent when the vision engine auto-detects the asset/timeframe
+  // from the chart UI headers, so manual inputs can be superseded.
+  onAssetTimeframeDetected?: (asset: string, timeframe: string) => void;
   geminiConnected: boolean;
 }
 
@@ -33,6 +36,7 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
   selectedSymbol,
   selectedTimeframe,
   onAnalysisComplete,
+  onAssetTimeframeDetected,
   geminiConnected,
 }) => {
   // Session & Capture States
@@ -50,6 +54,25 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
   const [signalResult, setSignalResult] = useState<SignalData | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [apiUsageCount, setApiUsageCount] = useState<number>(0);
+
+  // Candle Close Countdown (binary options candles close on minute boundaries)
+  const [secondsToClose, setSecondsToClose] = useState<number | null>(null);
+  const [isPreCloseWindow, setIsPreCloseWindow] = useState<boolean>(false);
+
+  const computeSecondsToClose = useCallback((timeframe: string): number | null => {
+    const now = new Date();
+    const totalSeconds = now.getMinutes() * 60 + now.getSeconds();
+    if (timeframe === '1M') {
+      // Candle closes at the top of every minute (:00 seconds)
+      return 60 - now.getSeconds();
+    }
+    if (timeframe === '5M') {
+      // Candle closes at :00, :05, :10 ... minute boundaries
+      const nextBoundary = Math.ceil((totalSeconds + 1) / 300) * 300;
+      return Math.max(0, nextBoundary - totalSeconds);
+    }
+    return 60 - now.getSeconds();
+  }, []);
 
   // Monitoring Activity Logs
   const [monitoringLogs, setMonitoringLogs] = useState<MonitoringLogEntry[]>([
@@ -235,15 +258,39 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
 
         if (!data || !data.success) throw new Error(data?.error || 'Frame analysis failed');
 
-        setSignalResult(data.result);
-        onAnalysisComplete(data.result);
+        const result = data.result;
+
+        // Auto-detected asset / timeframe sync — supersedes manual inputs
+        if (result.detectedAsset && result.detectedAsset !== selectedSymbol) {
+          onAssetTimeframeDetected?.(result.detectedAsset, selectedTimeframe);
+        }
+        if (result.detectedTimeframe && result.detectedTimeframe !== selectedTimeframe) {
+          onAssetTimeframeDetected?.(selectedSymbol, result.detectedTimeframe);
+        }
+
+        // State-change suppression: skip duplicate output when nothing significant changed
+        const prev = signalResult;
+        const isDuplicate = Boolean(
+          prev &&
+            prev.signal === result.signal &&
+            prev.detectedAsset === result.detectedAsset &&
+            prev.selectedTimeframe === result.selectedTimeframe &&
+            prev.candleCompletionStatus === result.candleCompletionStatus
+        );
+        if (isDuplicate) {
+          addLog('CAPTURE', 'No significant chart/candle-state change since last analysis — suppressing duplicate output.');
+        } else {
+          setSignalResult(result);
+          onAnalysisComplete(result);
+        }
+
         setLastAnalyzedHash(frameHash);
         setApiUsageCount((prev) => prev + 1);
         setLastAnalysisTimestamp(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
 
         addLog(
           'SIGNAL',
-          `Analysis complete: ${data.result.signal} (${data.result.confidenceScore}% confidence) — ${data.result.summaryReason}`,
+          `Analysis complete: ${result.signal} (${result.confidenceScore}% confidence) — ${result.summaryReason}`,
           data.result.signal,
           data.result.confidenceScore
         );
@@ -255,14 +302,50 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
         isAnalyzingRef.current = false;
       }
     },
-    [captureFrameFromVideo, lastAnalyzedHash, onAnalysisComplete, selectedSymbol, selectedTimeframe]
+    [
+      captureFrameFromVideo,
+      lastAnalyzedHash,
+      onAnalysisComplete,
+      onAssetTimeframeDetected,
+      selectedSymbol,
+      selectedTimeframe,
+      signalResult,
+    ]
   );
 
-  // 6. Toggle Continuous Auto Chart Monitoring Loop
+  // 6. Toggle Continuous Auto Chart Monitoring Loop (smart candle-sync polling)
+  const scheduleNextAnalysis = useCallback(() => {
+    if (!autoAnalysisActive || !streamActive) return;
+    if (isAnalyzingRef.current) {
+      // Still analyzing — retry shortly instead of overlapping calls
+      autoAnalysisTimerRef.current = setTimeout(scheduleNextAnalysis, 2000);
+      return;
+    }
+
+    const secs = computeSecondsToClose(selectedTimeframe);
+    setSecondsToClose(secs);
+    setIsPreCloseWindow(secs != null && secs >= 0 && secs <= 15);
+
+    runAnalysisCycle();
+
+    // Adaptive interval: fast-poll during the pre-close sure-shot window,
+    // otherwise poll at the configured base interval.
+    const isPreClose = secs != null && secs >= 0 && secs <= 15;
+    const delay = isPreClose ? 2000 : Math.max(analysisInterval * 1000, 1000);
+    autoAnalysisTimerRef.current = setTimeout(scheduleNextAnalysis, delay);
+  }, [
+    autoAnalysisActive,
+    streamActive,
+    selectedTimeframe,
+    analysisInterval,
+    computeSecondsToClose,
+    runAnalysisCycle,
+  ]);
+
   const toggleAutoMonitoring = () => {
     if (autoAnalysisActive) {
       if (autoAnalysisTimerRef.current) {
-        clearInterval(autoAnalysisTimerRef.current);
+        clearTimeout(autoAnalysisTimerRef.current);
         autoAnalysisTimerRef.current = null;
       }
       setAutoAnalysisActive(false);
@@ -273,24 +356,10 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
         return;
       }
       setAutoAnalysisActive(true);
-      addLog('INFO', `Auto chart monitoring started at ${analysisInterval}s interval.`);
-      runAnalysisCycle(undefined, true);
-
-      autoAnalysisTimerRef.current = setInterval(() => {
-        runAnalysisCycle();
-      }, analysisInterval * 1000);
+      addLog('INFO', 'Auto chart monitoring started — smart candle-sync polling enabled.');
+      scheduleNextAnalysis();
     }
   };
-
-  // Re-sync timer interval if interval changed while auto monitoring active
-  useEffect(() => {
-    if (autoAnalysisActive) {
-      if (autoAnalysisTimerRef.current) clearInterval(autoAnalysisTimerRef.current);
-      autoAnalysisTimerRef.current = setInterval(() => {
-        runAnalysisCycle();
-      }, analysisInterval * 1000);
-    }
-  }, [analysisInterval, autoAnalysisActive, runAnalysisCycle]);
 
   // 7. Tab Visibility Persistence Handling
   useEffect(() => {
@@ -310,7 +379,7 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
   // Clean up on unmount
   useEffect(() => {
     return () => {
-      if (autoAnalysisTimerRef.current) clearInterval(autoAnalysisTimerRef.current);
+      if (autoAnalysisTimerRef.current) clearTimeout(autoAnalysisTimerRef.current);
       if (mediaStreamRef.current) {
         mediaStreamRef.current.getTracks().forEach((track) => track.stop());
       }
@@ -388,9 +457,21 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
           )}
 
           {autoAnalysisActive && (
-            <span className="text-cyan-300 font-medium">
-              MONITORING ({analysisInterval}s interval)
-            </span>
+            <>
+              <span className="text-cyan-300 font-medium">
+                MONITORING ({analysisInterval}s interval)
+              </span>
+              {isPreCloseWindow && secondsToClose != null && (
+                <span className="ml-3 font-bold text-amber-400 animate-pulse">
+                  PRE-CLOSE {secondsToClose}s
+                </span>
+              )}
+              {!isPreCloseWindow && secondsToClose != null && (
+                <span className="ml-3 text-slate-400">
+                  Close in {secondsToClose}s
+                </span>
+              )}
+            </>
           )}
         </div>
       </div>

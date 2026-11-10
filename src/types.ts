@@ -41,6 +41,11 @@ export interface SignalData {
   nextCandleExpiryEstimate: string;
   invalidationConditions: string;
   confirmationChecklist: ConfirmationChecklist;
+  // Candle Close & Pre-Close Timing (Sure-Shot Edge)
+  preCloseSignal?: boolean;
+  candleCompletionStatus?: string;
+  secondsToClose?: number;
+  volatilityAssessment?: string;
   visionInsights?: {
     chartReadable: boolean;
     evidenceQuality: number;

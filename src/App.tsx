@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
 import { LiveScreenAnalyzerView } from './components/LiveScreenAnalyzerView';
@@ -30,6 +30,17 @@ export default function App() {
       document.documentElement.classList.remove('dark');
     }
   }, [isDarkMode]);
+
+  // Handle asset/timeframe auto-detected from the shared chart by the vision engine
+  const handleAssetTimeframeDetected = useCallback((detectedAsset: string, detectedTimeframe: string) => {
+    setSelectedSymbol((prev) => (prev === detectedAsset ? prev : detectedAsset));
+    setSelectedTimeframe((prev) => (prev === detectedTimeframe ? prev : detectedTimeframe));
+    console.log(
+      '[Auto-Detect] Chart header asset/timeframe:',
+      detectedAsset,
+      detectedTimeframe
+    );
+  }, []);
 
   // Check backend health
   const checkHealth = async () => {
@@ -81,6 +92,7 @@ export default function App() {
               selectedSymbol={selectedSymbol}
               selectedTimeframe={selectedTimeframe}
               onAnalysisComplete={setLatestSignal}
+              onAssetTimeframeDetected={handleAssetTimeframeDetected}
               geminiConnected={geminiConnected}
             />
           )}
