@@ -1,30 +1,51 @@
-import express from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 
 import { db } from './server/db.js';
-import { getActiveAiConfig, saveCustomAiConfig, deleteCustomApiKey } from './server/apiKeyManager.js';
+import {
+  getActiveAiConfig,
+  saveCustomAiConfig,
+  deleteCustomApiKey,
+  listAllProvidersStatus,
+  PROVIDER_CATALOG,
+} from './server/apiKeyManager.js';
 import { analyzeChartImage } from './server/geminiVision.js';
-import { analyzeTechnicalIndicators, findSupportResistance, OHLC } from './server/indicators.js';
-import { detectCandlestickPatterns } from './server/candlesticks.js';
-import { generateFusedSignal } from './server/signalEngine.js';
+import { generateVisualConfirmationSignal } from './server/signalEngine.js';
 import { askVoiceAssistant } from './server/voiceAssistant.js';
-import { runStrategyBacktest } from './server/backtester.js';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const isVercel = Boolean(process.env.VERCEL);
+
+// Request tracking & Safe Diagnostic Logging
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const requestId = crypto.randomUUID();
+  res.setHeader('X-Request-Id', requestId);
+  const start = Date.now();
+
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    const sanitizedUrl = req.originalUrl.split('?')[0];
+    if (!sanitizedUrl.startsWith('/assets/')) {
+      console.log(`[HTTP] ${req.method} ${sanitizedUrl} -> ${res.statusCode} (${duration}ms) [${requestId}]`);
+    }
+  });
+
+  next();
+});
 
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
-// Set up image upload directory
-const isVercel = Boolean(process.env.VERCEL);
+// Set up image upload directory (Vercel uses /tmp)
 const UPLOADS_DIR = isVercel ? '/tmp/uploads' : path.resolve(process.cwd(), 'uploads');
 
 if (!fs.existsSync(UPLOADS_DIR)) {
@@ -37,40 +58,13 @@ if (!fs.existsSync(UPLOADS_DIR)) {
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
-  filename: (_req, file, cb) => cb(null, `${Date.now()}_${file.originalname}`),
+  filename: (_req, file, cb) => cb(null, `${Date.now()}_${file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_')}`),
 });
 const upload = multer({ storage });
 
-// Helper to generate sample OHLC data for testing
-function generateSampleOHLC(symbol: string, timeframe: string, count = 100): OHLC[] {
-  const candles: OHLC[] = [];
-  let basePrice = symbol.includes('JPY') ? 155.20 : 1.0850;
-  const volatility = symbol.includes('JPY') ? 0.08 : 0.0004;
-  let now = Date.now() - count * 60 * 1000;
-
-  for (let i = 0; i < count; i++) {
-    const open = basePrice;
-    const change = (Math.random() - 0.48) * volatility;
-    const close = open + change;
-    const high = Math.max(open, close) + Math.random() * volatility * 0.5;
-    const low = Math.min(open, close) - Math.random() * volatility * 0.5;
-
-    candles.push({
-      timestamp: now + i * 60 * 1000,
-      open: Number(open.toFixed(5)),
-      high: Number(high.toFixed(5)),
-      low: Number(low.toFixed(5)),
-      close: Number(close.toFixed(5)),
-      volume: Math.floor(Math.random() * 500) + 100,
-    });
-    basePrice = close;
-  }
-  return candles;
-}
-
 // REST API Endpoints
 
-// 1. Health check & Diagnostics
+// 1. Health check & Diagnostics (Screen-Sharing AI Vision Architecture)
 app.get('/api/health', (_req, res) => {
   const aiConfig = getActiveAiConfig();
   const isKeyConfigured = Boolean(aiConfig.apiKey);
@@ -86,7 +80,9 @@ app.get('/api/health', (_req, res) => {
   res.json({
     status: 'OK',
     app: 'Quotex AI Vision Assistant',
-    version: '1.0.0',
+    version: '2.0.0',
+    mode: 'SCREEN_SHARING_AI_VISION_ONLY',
+    environment: isVercel ? 'vercel-serverless' : 'standalone-node',
     geminiKeyConfigured: isKeyConfigured,
     geminiKeyPrefix: aiConfig.maskedKey,
     activeProvider: aiConfig.provider,
@@ -101,6 +97,9 @@ app.get('/api/health', (_req, res) => {
 app.get('/api/ai-config', (_req, res) => {
   try {
     const config = getActiveAiConfig();
+    const providers = listAllProvidersStatus();
+    const activeProviderDef = PROVIDER_CATALOG.find((p) => p.id === config.provider) || PROVIDER_CATALOG[0];
+
     res.json({
       success: true,
       provider: config.provider,
@@ -109,11 +108,10 @@ app.get('/api/ai-config', (_req, res) => {
       isCustomKey: config.isCustomKey,
       hasKey: Boolean(config.apiKey),
       evidenceThreshold: config.evidenceThreshold,
-      supportedModels: [
-        { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash (Recommended · Fast Vision)', vision: true },
-        { id: 'gemini-4-argon', name: 'Gemini 4 Argon (High Thinking · Complex Analysis)', vision: true },
-        { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite (Ultra Fast)', vision: true },
-      ],
+      supportedModels: activeProviderDef.supportedModels,
+      allProviders: providers,
+      backupProvider: config.backupProvider,
+      backupModel: config.backupModel,
     });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -123,8 +121,8 @@ app.get('/api/ai-config', (_req, res) => {
 // Save AI Provider Configuration
 app.post('/api/ai-config', (req, res) => {
   try {
-    const { apiKey, provider, model, evidenceThreshold } = req.body;
-    const updated = saveCustomAiConfig({ apiKey, provider, model, evidenceThreshold });
+    const { apiKey, provider, model, evidenceThreshold, backupProvider, backupModel } = req.body;
+    const updated = saveCustomAiConfig({ apiKey, provider, model, evidenceThreshold, backupProvider, backupModel });
 
     res.json({
       success: true,
@@ -135,6 +133,8 @@ app.post('/api/ai-config', (req, res) => {
       isCustomKey: updated.isCustomKey,
       hasKey: Boolean(updated.apiKey),
       evidenceThreshold: updated.evidenceThreshold,
+      backupProvider: updated.backupProvider,
+      backupModel: updated.backupModel,
     });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -142,12 +142,13 @@ app.post('/api/ai-config', (req, res) => {
 });
 
 // Delete custom API key
-app.delete('/api/ai-config/key', (_req, res) => {
+app.delete('/api/ai-config/key', (req, res) => {
   try {
-    const updated = deleteCustomApiKey();
+    const { provider = 'gemini' } = req.query;
+    const updated = deleteCustomApiKey(String(provider));
     res.json({
       success: true,
-      message: 'Custom API key removed. Reverted to environment key if available.',
+      message: `Custom API key for ${provider} removed. Reverted to environment key if available.`,
       maskedKey: updated.maskedKey,
       isCustomKey: updated.isCustomKey,
       hasKey: Boolean(updated.apiKey),
@@ -157,24 +158,25 @@ app.delete('/api/ai-config/key', (_req, res) => {
   }
 });
 
-// Test Gemini Connection
+// Test AI Provider Connection
 app.post('/api/test-gemini', async (req, res) => {
   const startTime = Date.now();
   try {
-    const { apiKeyOverride, modelOverride } = req.body || {};
-    const aiConfig = getActiveAiConfig();
+    const { apiKeyOverride, modelOverride, providerOverride } = req.body || {};
+    const aiConfig = getActiveAiConfig(providerOverride);
+    const providerToTest = providerOverride || aiConfig.provider || 'gemini';
     const keyToTest = apiKeyOverride?.trim() || aiConfig.apiKey;
     const modelToTest = modelOverride || aiConfig.model;
 
     if (!keyToTest) {
       return res.status(400).json({
         success: false,
-        message: 'No API key available to test. Please paste a key first.',
+        message: `No API key available to test for provider '${providerToTest}'. Please enter a key first.`,
       });
     }
 
-    const prompt = 'Test Gemini API connection. Respond with "API Connection Operational".';
-    const reply = await askVoiceAssistant(prompt, { testMode: true });
+    const prompt = `Test ${providerToTest} API connection. Respond with "API Connection Operational".`;
+    const reply = await askVoiceAssistant(prompt, { testMode: true }, providerToTest, keyToTest, modelToTest);
     const latencyMs = Date.now() - startTime;
 
     if (reply.includes('invalid') || reply.includes('expired') || reply.includes('no AI API key')) {
@@ -187,7 +189,8 @@ app.post('/api/test-gemini', async (req, res) => {
 
     res.json({
       success: true,
-      message: `Gemini API connection validated successfully (${latencyMs}ms)!`,
+      message: `${providerToTest.toUpperCase()} API connection validated successfully (${latencyMs}ms)!`,
+      activeProvider: providerToTest,
       activeModel: modelToTest,
       maskedKey: keyToTest.length >= 8 ? `${keyToTest.slice(0, 4)}...${keyToTest.slice(-4)}` : 'SET',
       latencyMs,
@@ -196,15 +199,17 @@ app.post('/api/test-gemini', async (req, res) => {
   } catch (err: any) {
     res.status(500).json({
       success: false,
-      message: err.message || 'Gemini API validation failed.',
+      message: err.message || 'AI API validation failed.',
     });
   }
 });
 
-// 3. Vision Screenshot Analysis
+// 3. Screen Sharing Frame & Screenshot Vision Analysis
+// PURE SCREEN-SHARING / SCREENSHOT PIPELINE:
+// USER'S SHARED SCREEN → SCREEN FRAME → AI VISION MODEL → VISUAL CHART ANALYSIS → CONFIRMATION ENGINE → CALL/PUT/WAIT
 app.post('/api/analyze-vision', upload.single('screenshot'), async (req, res) => {
   try {
-    const { symbol = 'EUR/USD (OTC)', timeframe = '1M', base64Image, model } = req.body;
+    const { symbol = 'EUR/USD (OTC)', timeframe = '1M', base64Image, model, provider } = req.body;
 
     let imageBuffer: string;
     let mimeType = 'image/png';
@@ -220,22 +225,20 @@ app.post('/api/analyze-vision', upload.single('screenshot'), async (req, res) =>
       if (base64Image.startsWith('data:image/jpeg')) mimeType = 'image/jpeg';
       else if (base64Image.startsWith('data:image/webp')) mimeType = 'image/webp';
     } else {
-      return res.status(400).json({ error: 'No image provided. Please upload a screenshot or submit base64 data.' });
+      return res.status(400).json({ success: false, error: 'No chart frame provided. Please share your screen or upload a screenshot.' });
     }
 
-    const aiConfig = getActiveAiConfig();
-    const modelToUse = model || aiConfig.model || 'gemini-3.8-flash';
+    const aiConfig = getActiveAiConfig(provider);
+    const providerToUse = provider || aiConfig.provider;
+    const modelToUse = model || aiConfig.model || 'gemini-1.5-flash';
 
-    // Run Gemini Vision Analysis
-    const visionOutput = await analyzeChartImage(imageBuffer, mimeType, symbol, timeframe, modelToUse);
+    // 1. Run Pure Vision Analysis on Shared Screen / Screenshot
+    const visionOutput = await analyzeChartImage(imageBuffer, mimeType, symbol, timeframe, modelToUse, providerToUse);
 
-    // Generate sample OHLC context for indicator fusion
-    const sampleOHLC = generateSampleOHLC(symbol, timeframe, 60);
+    // 2. Run Visual Confirmation Engine (Checklist & next-candle verification)
+    const confirmedSignal = generateVisualConfirmationSignal(visionOutput, timeframe, symbol);
 
-    // Run Signal Fusion Engine
-    const fusedSignal = generateFusedSignal(sampleOHLC, visionOutput);
-
-    // Save to SQLite
+    // 3. Save to database history
     try {
       const stmt = db.prepare(`
         INSERT INTO analysis_history (
@@ -249,19 +252,19 @@ app.post('/api/analyze-vision', upload.single('screenshot'), async (req, res) =>
         new Date().toISOString(),
         symbol,
         timeframe,
-        fusedSignal.signal,
-        fusedSignal.evidenceQualityScore,
+        confirmedSignal.signal,
+        confirmedSignal.confidenceScore,
         visionOutput.chartReadable ? 1 : 0,
         visionOutput.trend,
         visionOutput.momentum,
         visionOutput.candleObservation,
         JSON.stringify(visionOutput.visibleIndicators || []),
         visionOutput.supportResistance,
-        JSON.stringify(fusedSignal.supportingEvidence),
-        JSON.stringify(fusedSignal.opposingEvidence),
+        JSON.stringify(confirmedSignal.supportingEvidence),
+        JSON.stringify(confirmedSignal.opposingEvidence),
         JSON.stringify(visionOutput.conflicts || []),
-        visionOutput.invalidation,
-        visionOutput.riskNotes,
+        confirmedSignal.invalidationConditions,
+        JSON.stringify(confirmedSignal.riskNotes),
         savedFileName,
         modelToUse
       );
@@ -271,7 +274,7 @@ app.post('/api/analyze-vision', upload.single('screenshot'), async (req, res) =>
 
     res.json({
       success: true,
-      result: fusedSignal,
+      result: confirmedSignal,
       rawVision: visionOutput,
       savedFileName,
     });
@@ -284,101 +287,20 @@ app.post('/api/analyze-vision', upload.single('screenshot'), async (req, res) =>
   }
 });
 
-// 4. Technical Indicator Analysis Endpoint
-app.post('/api/analyze-technical', (req, res) => {
-  try {
-    const { symbol = 'EUR/USD (OTC)', timeframe = '1M', candles } = req.body;
-
-    const ohlcData: OHLC[] = candles && Array.isArray(candles) && candles.length > 0
-      ? candles
-      : generateSampleOHLC(symbol, timeframe, 100);
-
-    const indicators = analyzeTechnicalIndicators(ohlcData);
-    const candlestickPatterns = detectCandlestickPatterns(ohlcData);
-    const fusedSignal = generateFusedSignal(ohlcData);
-
-    res.json({
-      success: true,
-      symbol,
-      timeframe,
-      candleCount: ohlcData.length,
-      lastCandle: ohlcData[ohlcData.length - 1],
-      indicators,
-      candlestickPatterns,
-      fusedSignal,
-    });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// 5. Ask Voice Assistant
+// 4. Ask Voice Assistant
 app.post('/api/ask-voice', async (req, res) => {
   try {
-    const { query, context } = req.body;
-    if (!query) return res.status(400).json({ error: 'Query prompt required' });
+    const { query, context, provider, model } = req.body;
+    if (!query) return res.status(400).json({ success: false, error: 'Query prompt required' });
 
-    const reply = await askVoiceAssistant(query, context);
+    const reply = await askVoiceAssistant(query, context, provider, undefined, model);
     res.json({ success: true, reply });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// 6. Backtesting Runner Endpoint
-app.post('/api/backtest', (req, res) => {
-  try {
-    const { symbol = 'EUR/USD (OTC)', timeframe = '1M', expiryCandles = 1, payoutPercentage = 85, evidenceThreshold = 65, candles } = req.body;
-
-    const ohlcData: OHLC[] = candles && Array.isArray(candles) && candles.length > 50
-      ? candles
-      : generateSampleOHLC(symbol, timeframe, 300);
-
-    const result = runStrategyBacktest(ohlcData, {
-      symbol,
-      timeframe,
-      expiryCandles: Number(expiryCandles),
-      payoutPercentage: Number(payoutPercentage),
-      evidenceThreshold: Number(evidenceThreshold),
-    });
-
-    try {
-      const stmt = db.prepare(`
-        INSERT INTO backtest_results (
-          timestamp, symbol, timeframe, total_candles, total_signals,
-          call_count, put_count, wait_count, win_count, loss_count,
-          win_rate, profit_factor, expectancy, max_drawdown, config_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-
-      stmt.run(
-        new Date().toISOString(),
-        result.symbol,
-        result.timeframe,
-        result.totalCandles,
-        result.totalSignals,
-        result.callCount,
-        result.putCount,
-        result.waitCount,
-        result.winCount,
-        result.lossCount,
-        result.winRate,
-        result.profitFactor,
-        result.expectancy,
-        result.maxDrawdown,
-        JSON.stringify({ expiryCandles, payoutPercentage, evidenceThreshold })
-      );
-    } catch (dbErr) {
-      console.warn('Could not save backtest result:', dbErr);
-    }
-
-    res.json({ success: true, backtest: result });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// 7. Get Analysis History
+// 5. Get Analysis History
 app.get('/api/history', (req, res) => {
   try {
     const { limit = 50, symbol, signal } = req.query;
@@ -405,7 +327,6 @@ app.get('/api/history', (req, res) => {
   }
 });
 
-// Delete history item
 app.delete('/api/history/:id', (req, res) => {
   try {
     const { id } = req.params;
@@ -416,7 +337,6 @@ app.delete('/api/history/:id', (req, res) => {
   }
 });
 
-// Clear all history
 app.delete('/api/history', (_req, res) => {
   try {
     db.prepare('DELETE FROM analysis_history').run();
@@ -426,22 +346,14 @@ app.delete('/api/history', (_req, res) => {
   }
 });
 
-// 8. Get Sample OHLC
-app.get('/api/ohlc-sample', (req, res) => {
-  const { symbol = 'EUR/USD (OTC)', timeframe = '1M', count = 100 } = req.query;
-  const candles = generateSampleOHLC(String(symbol), String(timeframe), Number(count));
-  res.json({ success: true, symbol, timeframe, candles });
-});
-
-// 9. User Settings API
+// 6. User Settings API
 app.get('/api/settings', (_req, res) => {
   try {
     const rows = db.prepare('SELECT * FROM user_settings').all() as { key: string; value: string }[];
     const settingsObj: Record<string, string> = {};
     for (const r of rows) {
-      // Redact custom_gemini_key
-      if (r.key === 'custom_gemini_key') {
-        settingsObj['custom_gemini_key'] = r.value ? `${r.value.slice(0, 4)}...${r.value.slice(-4)}` : '';
+      if (r.key.includes('key')) {
+        settingsObj[r.key] = r.value ? `${r.value.slice(0, 4)}...${r.value.slice(-4)}` : '';
       } else {
         settingsObj[r.key] = r.value;
       }
@@ -456,7 +368,7 @@ app.post('/api/settings', (req, res) => {
   try {
     const { settings } = req.body;
     if (!settings || typeof settings !== 'object') {
-      return res.status(400).json({ error: 'Invalid settings object' });
+      return res.status(400).json({ success: false, error: 'Invalid settings object' });
     }
 
     const stmt = db.prepare('INSERT OR REPLACE INTO user_settings (key, value) VALUES (?, ?)');
@@ -473,10 +385,38 @@ app.post('/api/settings', (req, res) => {
   }
 });
 
-// Export Express App for Vite Integration in Server Mode
+// Central 404 handler for unrecognized /api/ routes to guarantee valid JSON
+app.all('/api/*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    error: `API route not found: ${req.method} ${req.path}`,
+    statusCode: 404,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Central JSON Error Handling Middleware for Express
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('[API Central Error Handler]', err);
+  const status = err.status || err.statusCode || 500;
+  res.status(status).json({
+    success: false,
+    error: err.message || 'Internal Server Error',
+    statusCode: status,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Export Express App for Vercel Serverless Function & Testing
 export { app };
 
-// Start Standalone / Integrated Server
+// Start Standalone Server ONLY when executed directly (not when imported as a serverless module)
+const isDirectRun = !isVercel && (
+  process.argv[1]?.endsWith('server.ts') ||
+  process.argv[1]?.endsWith('server.js') ||
+  process.env.RUN_STANDALONE === 'true'
+);
+
 async function startServer() {
   if (process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'test') {
     const { createServer: createViteServer } = await import('vite');
@@ -489,11 +429,13 @@ async function startServer() {
 
   if (process.env.NODE_ENV !== 'test') {
     app.listen(PORT, () => {
-      console.log(`[Quotex AI Vision Assistant] Full-stack application active on http://localhost:${PORT}`);
+      console.log(`[Quotex AI Vision Assistant] Screen-Sharing AI Vision server active on http://localhost:${PORT}`);
     });
   }
 }
 
-startServer().catch((err) => {
-  console.error('Server startup error:', err);
-});
+if (isDirectRun) {
+  startServer().catch((err) => {
+    console.error('Server startup error:', err);
+  });
+}

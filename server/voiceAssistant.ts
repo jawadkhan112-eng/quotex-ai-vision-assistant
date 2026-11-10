@@ -3,23 +3,19 @@ import { getActiveAiConfig } from './apiKeyManager.js';
 
 export async function askVoiceAssistant(
   userQuery: string,
-  contextData?: any
+  contextData?: any,
+  providerOverride?: string,
+  apiKeyOverride?: string,
+  modelOverride?: string
 ): Promise<string> {
-  const aiConfig = getActiveAiConfig();
-  const apiKey = aiConfig.apiKey;
+  const aiConfig = getActiveAiConfig(providerOverride);
+  const provider = providerOverride || aiConfig.provider || 'gemini';
+  const apiKey = apiKeyOverride || aiConfig.apiKey;
+  const model = modelOverride || aiConfig.model || (provider === 'gemini' ? 'gemini-1.5-flash' : 'llama-3.3-70b-versatile');
 
   if (!apiKey) {
     return 'Voice assistant is ready. However, no AI API key is configured. Please add your key in Settings -> AI/API Configuration.';
   }
-
-  const ai = new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
 
   const systemInstruction = `You are Quotex AI Vision Voice Assistant, an expert quantitative analyst and risk management advisor for binary options.
 Your voice responses must be:
@@ -32,15 +28,60 @@ Current Analysis Context:
 ${JSON.stringify(contextData || {}, null, 2)}`;
 
   try {
-    const response = await ai.models.generateContent({
-      model: aiConfig.model || 'gemini-3.8-flash',
-      contents: userQuery,
-      config: {
-        systemInstruction,
-      },
-    });
+    if (provider === 'gemini') {
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'quotex-ai-vision-assistant/1.0',
+          },
+        },
+      });
 
-    return response.text || 'I analyzed the chart context. Please ask any specific questions about signals or indicators.';
+      const response = await ai.models.generateContent({
+        model,
+        contents: userQuery,
+        config: {
+          systemInstruction,
+        },
+      });
+
+      return response.text || 'I analyzed the chart context. Please ask any specific questions about signals or indicators.';
+    } else if (provider === 'groq' || provider === 'openrouter' || provider === 'openai') {
+      const endpoint = provider === 'groq'
+        ? 'https://api.groq.com/openai/v1/chat/completions'
+        : provider === 'openrouter'
+        ? 'https://openrouter.ai/api/v1/chat/completions'
+        : 'https://api.openai.com/v1/chat/completions';
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: systemInstruction },
+            { role: 'user', content: userQuery },
+          ],
+          temperature: 0.3,
+          max_tokens: 300,
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => '');
+        throw new Error(`${provider.toUpperCase()} chat error (${res.status}): ${errorText.slice(0, 150)}`);
+      }
+
+      const data = await res.json() as any;
+      return data.choices?.[0]?.message?.content || 'Analysis complete.';
+    } else {
+      return 'Voice assistant: active provider text generation complete.';
+    }
   } catch (err: any) {
     console.error('Voice Assistant Error:', err);
     if (err.message?.includes('429')) {

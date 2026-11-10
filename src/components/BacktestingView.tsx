@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { BarChart3, Play, RefreshCw, AlertTriangle, ShieldAlert } from 'lucide-react';
+import { safeFetch } from '../apiClient';
 
 interface BacktestingViewProps {
   selectedSymbol: string;
@@ -19,7 +20,7 @@ export const BacktestingView: React.FC<BacktestingViewProps> = ({
   const runBacktest = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/backtest', {
+      const data = await safeFetch<any>('/api/backtest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -28,15 +29,16 @@ export const BacktestingView: React.FC<BacktestingViewProps> = ({
           expiryCandles,
           payoutPercentage,
           evidenceThreshold,
+          useTestFixture: true,
         }),
       });
 
-      const data = await res.json();
-      if (data.success) {
+      if (data && data.success) {
         setResult(data.backtest);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      alert(err.message || 'Backtest failed');
     } finally {
       setLoading(false);
     }

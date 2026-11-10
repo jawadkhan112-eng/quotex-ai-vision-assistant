@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { TrendingUp, RefreshCw, Layers, Activity, SlidersHorizontal } from 'lucide-react';
+import { safeFetch } from '../apiClient';
 
 interface IndicatorData {
   ema9?: number;
@@ -33,13 +34,12 @@ export const TechnicalIndicatorsView: React.FC<TechnicalIndicatorsViewProps> = (
   const fetchTechnicalData = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/analyze-technical', {
+      const data = await safeFetch<any>('/api/analyze-technical', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol: selectedSymbol, timeframe: selectedTimeframe }),
       });
-      const data = await res.json();
-      if (data.success) {
+      if (data && data.success) {
         setIndicators(data.indicators);
         setFusedSignal(data.fusedSignal);
       }

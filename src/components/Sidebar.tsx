@@ -1,14 +1,10 @@
 import React from 'react';
 import {
-  LayoutDashboard,
-  Camera,
   MonitorPlay,
+  Camera,
   BrainCircuit,
-  TrendingUp,
-  Flame,
-  Mic,
   History,
-  BarChart3,
+  Mic,
   Sliders,
   Activity,
   Settings,
@@ -24,15 +20,11 @@ interface SidebarProps {
 }
 
 const NAV_ITEMS: { id: TabId; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
-  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { id: 'live_screen', label: 'Screen Share Workspace', icon: MonitorPlay },
   { id: 'screenshot', label: 'Screenshot Analyzer', icon: Camera },
-  { id: 'live_screen', label: 'Live Screen Analyzer', icon: MonitorPlay },
-  { id: 'ai_analysis', label: 'AI Vision Breakdown', icon: BrainCircuit },
-  { id: 'indicators', label: 'Technical Indicators', icon: TrendingUp },
-  { id: 'candlesticks', label: 'Candlestick Patterns', icon: Flame },
+  { id: 'ai_analysis', label: 'Visual Confirmations', icon: BrainCircuit },
+  { id: 'history', label: 'Signal History & Logs', icon: History },
   { id: 'voice_assistant', label: 'AI Voice Assistant', icon: Mic },
-  { id: 'history', label: 'Signal History', icon: History },
-  { id: 'backtesting', label: 'Backtesting Suite', icon: BarChart3 },
   { id: 'ai_settings', label: 'AI Provider Settings', icon: Sliders },
   { id: 'diagnostics', label: 'Diagnostics & Health', icon: Activity },
   { id: 'app_settings', label: 'App Settings', icon: Settings },
@@ -49,7 +41,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, gemin
           </div>
           <div>
             <h1 className="font-semibold text-sm text-slate-100 tracking-tight leading-none">QUOTEX AI VISION</h1>
-            <p className="text-[11px] text-slate-400 mt-0.5">Analysis Terminal v1.0</p>
+            <p className="text-[11px] text-slate-400 mt-0.5">Screen-Sharing Intelligence v2.0</p>
           </div>
         </div>
       </div>
@@ -80,7 +72,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, gemin
       <div className="p-3 border-t border-slate-800/80 bg-slate-900/50">
         <div className="flex items-center justify-between px-2 py-1.5 rounded-md bg-slate-950/60 border border-slate-800/60 text-[11px]">
           <span className="text-slate-400 flex items-center gap-1.5">
-            <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" /> AI Engine
+            <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" /> AI Vision Engine
           </span>
           <span className={`font-mono font-medium ${geminiConnected ? 'text-emerald-400' : 'text-amber-400'}`}>
             {geminiConnected ? 'READY' : 'KEY MISSING'}

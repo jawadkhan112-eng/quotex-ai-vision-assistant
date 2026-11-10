@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Mic, MicOff, Volume2, VolumeX, Send, Sparkles, User, Bot, RefreshCw } from 'lucide-react';
 import { SignalData } from '../types';
+import { safeFetch } from '../apiClient';
 
 interface VoiceAssistantViewProps {
   latestSignal: SignalData | null;
@@ -107,7 +108,7 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({ latestSi
     setLoading(true);
 
     try {
-      const res = await fetch('/api/ask-voice', {
+      const data = await safeFetch<any>('/api/ask-voice', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -116,7 +117,6 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({ latestSi
         }),
       });
 
-      const data = await res.json();
       const replyText = data.reply || 'I analyzed your query. Please ask further chart details.';
 
       const botMsg: ChatMessage = {
@@ -128,8 +128,14 @@ export const VoiceAssistantView: React.FC<VoiceAssistantViewProps> = ({ latestSi
 
       setMessages((prev) => [...prev, botMsg]);
       speakText(replyText);
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      const errorMsg: ChatMessage = {
+        id: (Date.now() + 1).toString(),
+        sender: 'assistant',
+        text: err.message || 'Unable to connect to AI voice assistant.',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      };
+      setMessages((prev) => [...prev, errorMsg]);
     } finally {
       setLoading(false);
     }

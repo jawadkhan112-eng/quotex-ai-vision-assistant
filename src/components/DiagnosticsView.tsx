@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Activity, CheckCircle2, AlertTriangle, RefreshCw, Cpu, Database, Monitor, Mic, Key } from 'lucide-react';
+import { safeFetch } from '../apiClient';
 
 export const DiagnosticsView: React.FC = () => {
   const [running, setRunning] = useState(false);
@@ -31,9 +32,8 @@ export const DiagnosticsView: React.FC = () => {
     };
 
     try {
-      const res = await fetch('/api/health');
-      const data = await res.json();
-      if (data.status === 'OK') {
+      const data = await safeFetch<any>('/api/health');
+      if (data && data.status === 'OK') {
         results.backend = true;
         results.database = data.databaseStatus === 'ONLINE';
         results.geminiKey = data.geminiKeyConfigured;

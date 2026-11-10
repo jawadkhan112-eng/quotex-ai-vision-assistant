@@ -129,18 +129,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
 
         <div
-          onClick={() => setActiveTab('indicators')}
+          onClick={() => setActiveTab('ai_analysis')}
           className="p-5 rounded-xl bg-slate-900 border border-slate-800 hover:border-cyan-500/50 cursor-pointer transition-all space-y-3 group"
         >
           <div className="w-10 h-10 rounded-lg bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
             <TrendingUp className="w-5 h-5" />
           </div>
           <h3 className="font-semibold text-slate-100 flex items-center justify-between">
-            Technical Indicator Engine
+            Visual Confirmation Engine
             <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-indigo-400 transition-colors" />
           </h3>
           <p className="text-xs text-slate-400 leading-relaxed">
-            Compute mathematical EMA, SMA, RSI, MACD, ATR, ADX, Bollinger Bands, and Supertrend on genuine OHLC market data.
+            Audit transparent multi-condition confirmation checklist (Trend, S/R, Candlestick Anatomy, and Momentum) from screen captures.
           </p>
         </div>
 

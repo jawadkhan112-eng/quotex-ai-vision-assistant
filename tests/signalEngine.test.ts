@@ -1,24 +1,32 @@
 import { describe, it, expect } from 'vitest';
-import { generateFusedSignal } from '../server/signalEngine';
-import { OHLC } from '../server/indicators';
+import { generateVisualConfirmationSignal } from '../server/signalEngine';
+import { VisionAnalysisResult } from '../server/geminiVision';
 
-describe('Fused Signal Intelligence Engine Tests', () => {
+describe('Fused Signal Intelligence & Visual Confirmation Tests', () => {
   it('returns WAIT when no data or weak data is provided', () => {
-    const result = generateFusedSignal([]);
+    const unreadable: VisionAnalysisResult = {
+      signal: 'WAIT',
+      chartReadable: false,
+      evidenceQuality: 0,
+      trend: 'UNKNOWN',
+      momentum: 'NEUTRAL',
+      candleObservation: '',
+      supportResistance: '',
+      visibleIndicators: [],
+      reasons: [],
+      opposingEvidence: [],
+      conflicts: [],
+      missingData: [],
+      invalidation: '',
+      riskNotes: '',
+    };
+    const result = generateVisualConfirmationSignal(unreadable);
     expect(result.signal).toBe('WAIT');
-    expect(result.summaryReason).toContain('WAIT recommended');
+    expect(result.summaryReason).toContain('Visual evidence insufficient');
   });
 
   it('returns WAIT when vision AI reports unreadable chart or low evidence quality', () => {
-    const candles: OHLC[] = Array.from({ length: 30 }, (_, i) => ({
-      timestamp: i,
-      open: 1.0800,
-      high: 1.0810,
-      low: 1.0790,
-      close: 1.0805,
-    }));
-
-    const result = generateFusedSignal(candles, {
+    const result = generateVisualConfirmationSignal({
       signal: 'CALL',
       chartReadable: false, // Unreadable
       evidenceQuality: 40,
@@ -38,23 +46,15 @@ describe('Fused Signal Intelligence Engine Tests', () => {
     expect(result.signal).toBe('WAIT');
   });
 
-  it('generates CALL when strong bullish alignment exists across indicators and vision', () => {
-    // Bullish candles sequence
-    const candles: OHLC[] = Array.from({ length: 40 }, (_, i) => ({
-      timestamp: i,
-      open: 1.0800 + i * 0.0005,
-      high: 1.0808 + i * 0.0005,
-      low: 1.0798 + i * 0.0005,
-      close: 1.0806 + i * 0.0005,
-    }));
-
-    const result = generateFusedSignal(candles, {
+  it('generates CALL when strong bullish alignment exists across confirmations', () => {
+    const result = generateVisualConfirmationSignal({
       signal: 'CALL',
       chartReadable: true,
       evidenceQuality: 88,
       trend: 'STRONG_BULLISH',
       momentum: 'ACCELERATING_UP',
       candleObservation: 'Consecutive bullish candles closing near high',
+      candlestickPattern: 'Three White Soldiers',
       visibleIndicators: ['EMA 9/21 Crossover', 'RSI Bullish'],
       supportResistance: 'Support confirmed at 1.0800',
       reasons: ['Strong bullish momentum', 'Support bounce'],
@@ -63,9 +63,19 @@ describe('Fused Signal Intelligence Engine Tests', () => {
       missingData: [],
       invalidation: 'Break below 1.0800',
       riskNotes: 'Normal risk management applies',
+      checklist: {
+        trendConfirmed: true,
+        candleStructureConfirmed: true,
+        momentumConfirmed: true,
+        supportResistanceConfirmed: true,
+        patternConfirmed: true,
+        visibleIndicatorConfirmed: true,
+        multiCandleConfirmed: true,
+      },
     });
 
     expect(result.signal).toBe('CALL');
-    expect(result.evidenceQualityScore).toBeGreaterThanOrEqual(65);
+    expect(result.confidenceScore).toBeGreaterThanOrEqual(65);
+    expect(result.confirmationChecklist.trendConfirmation.status).toBe('PASSED');
   });
 });

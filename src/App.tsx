@@ -1,22 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
-import { DashboardView } from './components/DashboardView';
-import { ScreenshotAnalyzerView } from './components/ScreenshotAnalyzerView';
 import { LiveScreenAnalyzerView } from './components/LiveScreenAnalyzerView';
+import { ScreenshotAnalyzerView } from './components/ScreenshotAnalyzerView';
 import { AiAnalysisView } from './components/AiAnalysisView';
-import { TechnicalIndicatorsView } from './components/TechnicalIndicatorsView';
-import { CandlestickPatternsView } from './components/CandlestickPatternsView';
 import { VoiceAssistantView } from './components/VoiceAssistantView';
 import { SignalHistoryView } from './components/SignalHistoryView';
-import { BacktestingView } from './components/BacktestingView';
 import { AiSettingsView } from './components/AiSettingsView';
 import { DiagnosticsView } from './components/DiagnosticsView';
 import { AppSettingsView } from './components/AppSettingsView';
 import { TabId, SignalData } from './types';
+import { safeFetch } from './apiClient';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<TabId>('dashboard');
+  // Flagship default view is live screen sharing workspace
+  const [activeTab, setActiveTab] = useState<TabId>('live_screen');
   const [selectedSymbol, setSelectedSymbol] = useState('EUR/USD (OTC)');
   const [selectedTimeframe, setSelectedTimeframe] = useState('1M');
   const [isDarkMode, setIsDarkMode] = useState(true);
@@ -36,9 +34,8 @@ export default function App() {
   // Check backend health
   const checkHealth = async () => {
     try {
-      const res = await fetch('/api/health');
-      const data = await res.json();
-      if (data.status === 'OK') {
+      const data = await safeFetch<any>('/api/health');
+      if (data && data.status === 'OK') {
         setBackendHealthy(true);
         setGeminiConnected(data.geminiKeyConfigured);
       } else {
@@ -79,12 +76,11 @@ export default function App() {
         />
 
         <main className="flex-1 overflow-y-auto bg-slate-950 text-slate-100">
-          {activeTab === 'dashboard' && (
-            <DashboardView
+          {activeTab === 'live_screen' && (
+            <LiveScreenAnalyzerView
               selectedSymbol={selectedSymbol}
               selectedTimeframe={selectedTimeframe}
-              latestSignal={latestSignal}
-              setActiveTab={setActiveTab}
+              onAnalysisComplete={setLatestSignal}
               geminiConnected={geminiConnected}
             />
           )}
@@ -98,31 +94,8 @@ export default function App() {
             />
           )}
 
-          {activeTab === 'live_screen' && (
-            <LiveScreenAnalyzerView
-              selectedSymbol={selectedSymbol}
-              selectedTimeframe={selectedTimeframe}
-              onAnalysisComplete={setLatestSignal}
-              geminiConnected={geminiConnected}
-            />
-          )}
-
           {activeTab === 'ai_analysis' && (
             <AiAnalysisView latestSignal={latestSignal} />
-          )}
-
-          {activeTab === 'indicators' && (
-            <TechnicalIndicatorsView
-              selectedSymbol={selectedSymbol}
-              selectedTimeframe={selectedTimeframe}
-            />
-          )}
-
-          {activeTab === 'candlesticks' && (
-            <CandlestickPatternsView
-              selectedSymbol={selectedSymbol}
-              selectedTimeframe={selectedTimeframe}
-            />
           )}
 
           {activeTab === 'voice_assistant' && (
@@ -130,13 +103,6 @@ export default function App() {
           )}
 
           {activeTab === 'history' && <SignalHistoryView />}
-
-          {activeTab === 'backtesting' && (
-            <BacktestingView
-              selectedSymbol={selectedSymbol}
-              selectedTimeframe={selectedTimeframe}
-            />
-          )}
 
           {activeTab === 'ai_settings' && (
             <AiSettingsView
@@ -157,4 +123,4 @@ export default function App() {
       </div>
     </div>
   );
-};
+}

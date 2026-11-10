@@ -17,7 +17,7 @@ const DB_PATH = path.join(DB_DIR, 'quotex_vision.db');
 
 export const db = new Database(DB_PATH);
 
-// Initialize SQLite Schema
+// Initialize Database Schema with support for multi-provider credentials & OTCharts cache
 export function initDb() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS analysis_history (
@@ -48,6 +48,16 @@ export function initDb() {
       value TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS provider_credentials (
+      id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      encrypted_key TEXT NOT NULL,
+      custom_endpoint TEXT,
+      is_active INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS backtest_results (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       timestamp TEXT NOT NULL,
@@ -66,17 +76,27 @@ export function initDb() {
       max_drawdown REAL NOT NULL,
       config_json TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS market_data_cache (
+      symbol TEXT NOT NULL,
+      timeframe TEXT NOT NULL,
+      last_updated TEXT NOT NULL,
+      candles_json TEXT NOT NULL,
+      source TEXT NOT NULL,
+      PRIMARY KEY (symbol, timeframe)
+    );
   `);
 
   // Insert default settings if missing
   const setStmt = db.prepare('INSERT OR IGNORE INTO user_settings (key, value) VALUES (?, ?)');
   setStmt.run('ai_provider', 'gemini');
-  setStmt.run('model_name', 'gemini-3.8-flash');
+  setStmt.run('model_name', 'gemini-1.5-flash');
   setStmt.run('default_symbol', 'EUR/USD (OTC)');
   setStmt.run('default_timeframe', '1M');
   setStmt.run('auto_save_screenshots', 'true');
   setStmt.run('evidence_threshold', '65');
   setStmt.run('theme', 'dark');
+  setStmt.run('market_data_provider', 'otcharts');
 }
 
 initDb();

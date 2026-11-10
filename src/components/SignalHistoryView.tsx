@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { History, Download, Trash2, Search, Filter, RefreshCw } from 'lucide-react';
 import { HistoryRecord } from '../types';
+import { safeFetch } from '../apiClient';
 
 export const SignalHistoryView: React.FC = () => {
   const [history, setHistory] = useState<HistoryRecord[]>([]);
@@ -11,9 +12,8 @@ export const SignalHistoryView: React.FC = () => {
   const fetchHistory = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/history?limit=100');
-      const data = await res.json();
-      if (data.success) {
+      const data = await safeFetch<any>('/api/history?limit=100');
+      if (data && data.success) {
         setHistory(data.history);
       }
     } catch (err) {
@@ -29,7 +29,7 @@ export const SignalHistoryView: React.FC = () => {
 
   const deleteRecord = async (id: number) => {
     try {
-      await fetch(`/api/history/${id}`, { method: 'DELETE' });
+      await safeFetch(`/api/history/${id}`, { method: 'DELETE' });
       setHistory(history.filter((h) => h.id !== id));
     } catch (err) {
       console.error(err);
@@ -39,7 +39,7 @@ export const SignalHistoryView: React.FC = () => {
   const clearAllHistory = async () => {
     if (!window.confirm('Are you sure you want to clear all analysis history?')) return;
     try {
-      await fetch('/api/history', { method: 'DELETE' });
+      await safeFetch('/api/history', { method: 'DELETE' });
       setHistory([]);
     } catch (err) {
       console.error(err);

@@ -1,36 +1,46 @@
 export type TabId =
-  | 'dashboard'
-  | 'screenshot'
-  | 'live_screen'
-  | 'ai_analysis'
-  | 'indicators'
-  | 'candlesticks'
-  | 'voice_assistant'
-  | 'history'
-  | 'backtesting'
-  | 'ai_settings'
-  | 'diagnostics'
-  | 'app_settings';
+  | 'live_screen'      // Primary: Live screen-sharing analysis
+  | 'screenshot'       // Screenshot & clipboard capture
+  | 'ai_analysis'      // Visual chart breakdown & confirmations
+  | 'history'          // Signal history & logs
+  | 'voice_assistant'  // AI Voice assistant
+  | 'ai_settings'      // AI Provider settings
+  | 'diagnostics'      // System health & WebRTC diagnostics
+  | 'app_settings';    // App settings
+
+export interface ConfirmationItem {
+  id: string;
+  name: string;
+  status: 'PASSED' | 'FAILED' | 'UNCONFIRMED' | 'NOT_DETECTED';
+  detail: string;
+}
+
+export interface ConfirmationChecklist {
+  trendConfirmation: ConfirmationItem;
+  candleStructureConfirmation: ConfirmationItem;
+  momentumConfirmation: ConfirmationItem;
+  supportResistanceConfirmation: ConfirmationItem;
+  patternConfirmation: ConfirmationItem;
+  visibleIndicatorConfirmation: ConfirmationItem;
+  multiCandleConfirmation: ConfirmationItem;
+}
 
 export interface SignalData {
   signal: 'CALL' | 'PUT' | 'WAIT';
-  evidenceQualityScore: number;
+  confidenceScore: number; // 0 - 100 (Technical evidence score, not guaranteed win probability)
+  evidenceQualityScore: number; // For backward compatibility
   summaryReason: string;
+  analysisTimestamp: string;
+  selectedTimeframe: string;
+  detectedAsset?: string;
+  visualEvidence: string[];
   supportingEvidence: string[];
   opposingEvidence: string[];
-  indicatorConsensus: {
-    bullishCount: number;
-    bearishCount: number;
-    neutralCount: number;
-    trendBias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
-  };
-  candlestickMatches: {
-    patternName: string;
-    type: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
-    reliability: string;
-    description: string;
-    invalidationLevel: number;
-  }[];
+  conflictingEvidence: string[];
+  entryTimingGuidance: string;
+  nextCandleExpiryEstimate: string;
+  invalidationConditions: string;
+  confirmationChecklist: ConfirmationChecklist;
   visionInsights?: {
     chartReadable: boolean;
     evidenceQuality: number;
@@ -46,9 +56,9 @@ export interface SignalData {
     invalidation: string;
     riskNotes: string;
   };
-  invalidationLevel?: number;
-  riskNotes: string[];
   disclaimer: string;
+  providerUsed?: string;
+  modelUsed?: string;
 }
 
 export interface HistoryRecord {
@@ -72,4 +82,13 @@ export interface HistoryRecord {
   image_path?: string;
   model_used: string;
   notes?: string;
+}
+
+export interface MonitoringLogEntry {
+  id: string;
+  timestamp: string;
+  type: 'INFO' | 'CAPTURE' | 'ANALYSIS' | 'SIGNAL' | 'WARN' | 'ERROR';
+  message: string;
+  signal?: 'CALL' | 'PUT' | 'WAIT';
+  confidence?: number;
 }

@@ -1,6 +1,20 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Camera, Zap, AlertTriangle, CheckCircle2, ShieldAlert, FileImage, RefreshCw, Clipboard, Crop } from 'lucide-react';
+import {
+  Upload,
+  Camera,
+  Zap,
+  AlertTriangle,
+  CheckCircle2,
+  XCircle,
+  HelpCircle,
+  ShieldAlert,
+  FileImage,
+  RefreshCw,
+  Clipboard,
+  ListChecks,
+} from 'lucide-react';
 import { SignalData } from '../types';
+import { safeFetch } from '../apiClient';
 
 interface ScreenshotAnalyzerViewProps {
   selectedSymbol: string;
@@ -16,7 +30,6 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
   geminiConnected,
 }) => {
   const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [cropActive, setCropActive] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [signalResult, setSignalResult] = useState<SignalData | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -87,7 +100,7 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
             return;
           }
         }
-        setErrorMessage('No image found on clipboard. Copy a chart screenshot first (Ctrl+C or Win+Shift+S) and click Paste.');
+        setErrorMessage('No image found on clipboard. Copy a chart screenshot first (Win+Shift+S or Ctrl+C) and click Paste.');
       } else {
         setErrorMessage('Direct clipboard button access is restricted by browser. Please press Ctrl+V to paste your screenshot.');
       }
@@ -103,7 +116,7 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
     setErrorMessage(null);
 
     try {
-      const res = await fetch('/api/analyze-vision', {
+      const data = await safeFetch<any>('/api/analyze-vision', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -113,9 +126,8 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
         }),
       });
 
-      const data = await res.json();
-      if (!data.success) {
-        throw new Error(data.error || 'Vision analysis failed');
+      if (!data || !data.success) {
+        throw new Error(data?.error || 'Vision analysis failed');
       }
 
       setSignalResult(data.result);
@@ -236,7 +248,7 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
           {!geminiConnected && (
             <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center gap-2">
               <ShieldAlert className="w-4 h-4 shrink-0" />
-              <span>Gemini API key is not configured. Add GEMINI_API_KEY in AI Provider Settings or Vercel Environment.</span>
+              <span>AI Provider key not configured. Set your key in AI Provider Settings.</span>
             </div>
           )}
         </div>
@@ -248,7 +260,7 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
               {/* Signal Header Card */}
               <div className="flex items-center justify-between border-b border-slate-800 pb-4">
                 <div>
-                  <span className="text-xs text-slate-400 font-medium">RECOMMENDED SIGNAL</span>
+                  <span className="text-xs text-slate-400 font-medium">NEXT-CANDLE SIGNAL</span>
                   <div className="flex items-center gap-3 mt-1">
                     <span
                       className={`text-3xl font-black font-mono px-4 py-1 rounded-lg ${
@@ -267,64 +279,77 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
                   </div>
                 </div>
 
-                {/* Evidence Quality Score */}
+                {/* Confidence Score */}
                 <div className="text-right">
-                  <span className="text-xs text-slate-400 font-medium">EVIDENCE QUALITY</span>
+                  <span className="text-xs text-slate-400 font-medium">CONFIDENCE</span>
                   <div className="text-2xl font-bold font-mono text-cyan-400">
-                    {signalResult.evidenceQualityScore}%
+                    {signalResult.confidenceScore}%
                   </div>
-                  <span className="text-[10px] text-slate-500">Non-guaranteed score</span>
+                  <span className="text-[10px] text-slate-500">Technical confluence score</span>
                 </div>
               </div>
 
-              {/* Supporting Evidence */}
-              <div className="space-y-2">
-                <h4 className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400" /> Supporting Evidence ({signalResult.supportingEvidence.length})
-                </h4>
-                <ul className="space-y-1 text-xs text-slate-300 pl-5 list-disc">
-                  {signalResult.supportingEvidence.map((item, idx) => (
-                    <li key={idx} className="leading-relaxed">{item}</li>
-                  ))}
-                </ul>
+              {/* Timing & Expiry Guidance */}
+              <div className="grid grid-cols-2 gap-3 text-xs font-mono">
+                <div className="p-2.5 rounded bg-slate-950 border border-slate-800/80">
+                  <span className="text-slate-500 block text-[10px] uppercase">Entry Timing:</span>
+                  <span className="text-cyan-300 font-semibold">{signalResult.entryTimingGuidance}</span>
+                </div>
+
+                <div className="p-2.5 rounded bg-slate-950 border border-slate-800/80">
+                  <span className="text-slate-500 block text-[10px] uppercase">Next-Candle Expiry:</span>
+                  <span className="text-slate-200">{signalResult.nextCandleExpiryEstimate}</span>
+                </div>
               </div>
 
-              {/* Opposing Factors */}
-              {signalResult.opposingEvidence.length > 0 && (
+              {/* Transparent Confirmation Checklist */}
+              {signalResult.confirmationChecklist && (
                 <div className="space-y-2 border-t border-slate-800/80 pt-3">
-                  <h4 className="text-xs font-semibold text-amber-400 flex items-center gap-1.5">
-                    <AlertTriangle className="w-4 h-4" /> Opposing Factors & Risks ({signalResult.opposingEvidence.length})
+                  <h4 className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                    <ListChecks className="w-4 h-4 text-cyan-400" /> Transparent Confirmation Checklist
                   </h4>
-                  <ul className="space-y-1 text-xs text-amber-200/80 pl-5 list-disc">
-                    {signalResult.opposingEvidence.map((item, idx) => (
-                      <li key={idx} className="leading-relaxed">{item}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              {/* Candlestick Patterns */}
-              {signalResult.candlestickMatches.length > 0 && (
-                <div className="border-t border-slate-800/80 pt-3 space-y-2">
-                  <h4 className="text-xs font-semibold text-slate-300">Detected Candlestick Formations</h4>
-                  <div className="flex flex-wrap gap-2">
-                    {signalResult.candlestickMatches.map((pat, idx) => (
-                      <span
-                        key={idx}
-                        className="px-2.5 py-1 rounded bg-slate-800 border border-slate-700 text-xs font-medium text-slate-200"
+                  <div className="space-y-1.5 text-xs font-mono">
+                    {Object.values(signalResult.confirmationChecklist).map((item) => (
+                      <div
+                        key={item.id}
+                        className="flex items-center justify-between p-2 rounded bg-slate-950/60 border border-slate-800/60"
                       >
-                        {pat.patternName} ({pat.type})
-                      </span>
+                        <div className="flex items-center gap-2 truncate pr-2">
+                          {item.status === 'PASSED' ? (
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                          ) : item.status === 'FAILED' ? (
+                            <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                          ) : (
+                            <HelpCircle className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                          )}
+                          <span className="text-slate-300">{item.name}</span>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="text-[10px] text-slate-400 truncate max-w-[160px]">{item.detail}</span>
+                          <span
+                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                              item.status === 'PASSED'
+                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                : item.status === 'FAILED'
+                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                                : 'bg-slate-800 text-slate-400'
+                            }`}
+                          >
+                            {item.status}
+                          </span>
+                        </div>
+                      </div>
                     ))}
                   </div>
                 </div>
               )}
 
-              {/* Invalidation Level */}
-              {signalResult.invalidationLevel && (
-                <div className="border-t border-slate-800/80 pt-3 text-xs text-slate-400 flex items-center justify-between">
-                  <span>Invalidation Price Level:</span>
-                  <span className="font-mono text-cyan-300 font-semibold">{signalResult.invalidationLevel}</span>
+              {/* Invalidation Conditions */}
+              {signalResult.invalidationConditions && (
+                <div className="p-3 rounded-lg bg-rose-500/5 border border-rose-500/20 text-xs space-y-1">
+                  <span className="font-semibold text-rose-400 block">Signal Invalidation Condition:</span>
+                  <p className="text-rose-200/80 leading-relaxed">{signalResult.invalidationConditions}</p>
                 </div>
               )}
             </div>
@@ -333,7 +358,7 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
               <FileImage className="w-8 h-8 mx-auto text-slate-600" />
               <p className="text-sm font-medium">No Analysis Result Yet</p>
               <p className="text-xs max-w-sm mx-auto">
-                Paste a screenshot using <kbd className="text-cyan-400">Ctrl+V</kbd> or click "Paste Screenshot" to automatically load and analyze your chart.
+                Paste a screenshot using <kbd className="text-cyan-400">Ctrl+V</kbd> or click "Paste Screenshot" to load and analyze your chart.
               </p>
             </div>
           )}

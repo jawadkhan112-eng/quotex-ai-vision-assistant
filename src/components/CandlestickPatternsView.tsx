@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Flame, CheckCircle2, ShieldAlert, BookOpen, AlertCircle } from 'lucide-react';
+import { safeFetch } from '../apiClient';
 
 interface CandlestickPatternsViewProps {
   selectedSymbol: string;
@@ -65,12 +66,11 @@ export const CandlestickPatternsView: React.FC<CandlestickPatternsViewProps> = (
   const [detectedPatterns, setDetectedPatterns] = useState<any[]>([]);
 
   useEffect(() => {
-    fetch('/api/analyze-technical', {
+    safeFetch<any>('/api/analyze-technical', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ symbol: selectedSymbol, timeframe: selectedTimeframe }),
     })
-      .then((res) => res.json())
       .then((data) => {
         if (data.success && data.candlestickPatterns) {
           setDetectedPatterns(data.candlestickPatterns);
