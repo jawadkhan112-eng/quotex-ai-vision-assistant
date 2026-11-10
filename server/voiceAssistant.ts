@@ -1,5 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import { getActiveAiConfig } from './apiKeyManager.js';
+import { normalizeAiModel, getProviderModelCandidates, isFailoverEligibleError } from './aiRouter.js';
 
 export async function askVoiceAssistant(
   userQuery: string,
@@ -9,9 +10,13 @@ export async function askVoiceAssistant(
   modelOverride?: string
 ): Promise<string> {
   const aiConfig = getActiveAiConfig(providerOverride);
-  const provider = providerOverride || aiConfig.provider || 'gemini';
-  const apiKey = apiKeyOverride || aiConfig.apiKey;
-  const model = modelOverride || aiConfig.model || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama-3.3-70b-versatile');
+  const rawProvider = providerOverride || aiConfig.provider || 'gemini';
+  const rawModel = modelOverride || aiConfig.model || 'gemini-2.5-flash';
+
+  const normalized = normalizeAiModel(rawModel, rawProvider);
+  const provider = normalized.provider;
+  const model = normalized.model;
+  const apiKey = apiKeyOverride || (aiConfig.provider === provider ? aiConfig.apiKey : getActiveAiConfig(provider).apiKey);
 
   if (!apiKey) {
     return 'Voice assistant is ready. However, no AI API key is configured. Please add your key in Settings -> AI/API Configuration.';
@@ -29,20 +34,13 @@ ${JSON.stringify(contextData || {}, null, 2)}`;
 
   try {
     if (provider === 'gemini') {
-      const candidateModels = Array.from(new Set([
-        model,
-        'gemini-2.5-flash',
-        'gemini-2.0-flash',
-        'gemini-1.5-flash',
-        'gemini-1.5-flash-latest',
-        'gemini-1.5-pro',
-      ])).filter(Boolean);
+      const candidateModels = getProviderModelCandidates('gemini', model);
 
-      // Attempt REST endpoints first to avoid 404 SDK version mismatch
+      // Attempt REST endpoints first to avoid 404 SDK version mismatch (standard v1 preferred)
       for (const m of candidateModels) {
         const endpoints = [
-          `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`,
           `https://generativelanguage.googleapis.com/v1/models/${m}:generateContent?key=${apiKey}`,
+          `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`,
         ];
         for (const url of endpoints) {
           try {

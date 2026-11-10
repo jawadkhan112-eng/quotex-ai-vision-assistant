@@ -1,5 +1,6 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import { getActiveAiConfig, PROVIDER_CATALOG } from './apiKeyManager.js';
+import { normalizeAiModel, getProviderModelCandidates, isFailoverEligibleError } from './aiRouter.js';
 
 export interface VisionAnalysisResult {
   signal: 'CALL' | 'PUT' | 'WAIT';
@@ -105,48 +106,74 @@ export async function analyzeChartImage(
 ): Promise<VisionAnalysisResult> {
   const start = Date.now();
   const aiConfig = getActiveAiConfig(userProvider);
-  const provider = userProvider || aiConfig.provider || 'gemini';
-  const apiKey = aiConfig.apiKey;
-  const modelToUse = userModel || aiConfig.model || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama-3.2-11b-vision-preview');
+  const rawProvider = userProvider || aiConfig.provider || 'gemini';
+  const rawModel = userModel || aiConfig.model || 'gemini-2.5-flash';
 
-  if (!apiKey) {
-    throw new Error(`No API key configured for provider '${provider}'. Please check AI Settings or set the environment variable.`);
+  // 1. Dynamic Model Mapping & Vision Support Check via AI Router
+  const normalized = normalizeAiModel(rawModel, rawProvider);
+  const primaryProvider = normalized.provider;
+  let primaryModel = normalized.model;
+
+  // If selected model is text-only, automatically re-route to standard vision model
+  if (!normalized.isVisionSupported) {
+    console.warn(`[AI Router] Model '${rawModel}' on '${rawProvider}' is text-only. Seamlessly re-routing to vision model '${primaryModel}'`);
   }
 
-  // Ensure model has vision capability
-  const catalogEntry = PROVIDER_CATALOG.find((p) => p.id === provider);
-  const modelDef = catalogEntry?.supportedModels.find((m) => m.id === modelToUse);
-  if (modelDef && !modelDef.vision) {
-    throw new Error(`Selected model '${modelToUse}' is text-only and does not support image/vision analysis. Please select a vision model such as 'gemini-2.5-flash', 'gemini-2.0-flash', or 'claude-3.5-sonnet'.`);
-  }
+  const primaryApiKey = aiConfig.provider === primaryProvider ? aiConfig.apiKey : getActiveAiConfig(primaryProvider).apiKey;
 
-  // Strip base64 prefix if present
+  // Clean base64 payload
   const cleanBase64 = base64Image.replace(/^data:image\/\w+;base64,/, '');
 
-  try {
-    if (provider === 'gemini') {
-      return await analyzeWithGemini(cleanBase64, mimeType, symbol, timeframe, modelToUse, apiKey, start);
-    } else if (provider === 'groq' || provider === 'openrouter' || provider === 'openai') {
-      return await analyzeWithOpenAICompatible(cleanBase64, mimeType, symbol, timeframe, modelToUse, apiKey, provider, start);
-    } else {
-      // Default to Gemini
-      return await analyzeWithGemini(cleanBase64, mimeType, symbol, timeframe, 'gemini-2.5-flash', apiKey, start);
+  // 2. Multi-Provider Failover Pipeline: Primary -> Backup Provider
+  const attemptProviders: Array<{ provider: string; model: string; key: string }> = [];
+
+  if (primaryApiKey) {
+    attemptProviders.push({ provider: primaryProvider, model: primaryModel, key: primaryApiKey });
+  }
+
+  // Backup provider resolution (Groq, OpenRouter, or Gemini)
+  const candidateBackups = ['gemini', 'groq', 'openrouter'].filter((p) => p !== primaryProvider);
+  if (aiConfig.backupProvider && candidateBackups.includes(aiConfig.backupProvider)) {
+    // Put configured backup provider first in fallback list
+    candidateBackups.sort((a, b) => (a === aiConfig.backupProvider ? -1 : b === aiConfig.backupProvider ? 1 : 0));
+  }
+
+  for (const bProvider of candidateBackups) {
+    const bConfig = getActiveAiConfig(bProvider);
+    if (bConfig.apiKey) {
+      const bNorm = normalizeAiModel(bConfig.model, bProvider);
+      attemptProviders.push({ provider: bProvider, model: bNorm.model, key: bConfig.apiKey });
     }
-  } catch (err: any) {
-    // If primary provider failed and backup provider is configured, attempt fallback
-    if (aiConfig.backupProvider && aiConfig.backupProvider !== provider) {
-      console.warn(`[VisionAnalysis] Primary provider ${provider} failed (${err.message}), attempting backup provider ${aiConfig.backupProvider}...`);
-      try {
-        const backupConfig = getActiveAiConfig(aiConfig.backupProvider);
-        if (backupConfig.apiKey) {
-          return await analyzeChartImage(base64Image, mimeType, symbol, timeframe, aiConfig.backupModel, aiConfig.backupProvider);
-        }
-      } catch (backupErr: any) {
-        console.warn('[VisionAnalysis] Backup provider also failed:', backupErr.message);
+  }
+
+  if (attemptProviders.length === 0) {
+    throw new Error(`No AI API key found for '${primaryProvider}' or backup providers. Please add an API key in AI Settings or environment variables.`);
+  }
+
+  let lastError: any = null;
+
+  for (let i = 0; i < attemptProviders.length; i++) {
+    const { provider, model, key } = attemptProviders[i];
+    try {
+      if (provider === 'gemini') {
+        return await analyzeWithGemini(cleanBase64, mimeType, symbol, timeframe, model, key, start);
+      } else {
+        return await analyzeWithOpenAICompatible(cleanBase64, mimeType, symbol, timeframe, model, key, provider, start);
+      }
+    } catch (err: any) {
+      lastError = err;
+      const isLastAttempt = i === attemptProviders.length - 1;
+      const willFailover = isFailoverEligibleError(err) || !isLastAttempt;
+
+      console.warn(`[AI Router] Vision analysis failed on provider '${provider}' (model: ${model}): ${err.message}. ${willFailover && !isLastAttempt ? 'Failing over to backup provider...' : ''}`);
+
+      if (!willFailover && isLastAttempt) {
+        throw err;
       }
     }
-    throw err;
   }
+
+  throw lastError || new Error('Vision analysis failed across all active and backup AI providers.');
 }
 
 async function analyzeWithGemini(
@@ -161,22 +188,15 @@ async function analyzeWithGemini(
   const prompt = `${VISION_SYSTEM_PROMPT}\n\nChart Metadata: Symbol: "${symbol}", Timeframe: "${timeframe}".`;
 
   // Candidate models cascade to guarantee 404 resilience across active Gemini endpoints
-  const candidateModels = Array.from(new Set([
-    requestedModel,
-    'gemini-2.5-flash',
-    'gemini-2.0-flash',
-    'gemini-1.5-flash',
-    'gemini-1.5-flash-latest',
-    'gemini-1.5-pro',
-  ])).filter(Boolean);
+  const candidateModels = getProviderModelCandidates('gemini', requestedModel);
 
   let lastError: any = null;
 
-  // Attempt 1: Direct modern REST endpoint (supports standard v1 and v1beta paths without SDK model name mismatches)
+  // Attempt 1: Direct modern REST endpoint (prioritizes stable standard v1, then v1beta)
   for (const model of candidateModels) {
     const endpoints = [
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
       `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
     ];
 
     for (const url of endpoints) {
