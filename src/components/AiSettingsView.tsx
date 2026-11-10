@@ -37,7 +37,7 @@ interface ProviderStatus {
 
 export const AiSettingsView: React.FC<AiSettingsViewProps> = ({ geminiConnected, onRefreshHealth }) => {
   const [provider, setProvider] = useState('gemini');
-  const [selectedModel, setSelectedModel] = useState('gemini-1.5-flash');
+  const [selectedModel, setSelectedModel] = useState('gemini-2.5-flash');
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [maskedKey, setMaskedKey] = useState('NOT_SET');
@@ -66,7 +66,7 @@ export const AiSettingsView: React.FC<AiSettingsViewProps> = ({ geminiConnected,
       const data = await safeFetch<any>('/api/ai-config');
       if (data.success) {
         setProvider(data.provider || 'gemini');
-        setSelectedModel(data.model || 'gemini-1.5-flash');
+        setSelectedModel(data.model || 'gemini-2.5-flash');
         setMaskedKey(data.maskedKey || 'NOT_SET');
         setIsCustomKey(data.isCustomKey || false);
         setHasKey(data.hasKey || false);
@@ -250,11 +250,10 @@ export const AiSettingsView: React.FC<AiSettingsViewProps> = ({ geminiConnected,
             <button
               key={p.id}
               onClick={() => handleProviderChange(p.id)}
-              className={`p-3 rounded-xl border text-left transition-all ${
-                isSelected
+              className={`p-3 rounded-xl border text-left transition-all ${isSelected
                   ? 'bg-cyan-500/10 border-cyan-500/50 text-cyan-300 shadow-md shadow-cyan-500/10'
                   : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'
-              }`}
+                }`}
             >
               <div className="flex items-center justify-between text-xs font-semibold mb-1">
                 <span>{p.name.split(' ')[0]}</span>
@@ -406,11 +405,10 @@ export const AiSettingsView: React.FC<AiSettingsViewProps> = ({ geminiConnected,
         {/* Test Result Feedback Alert */}
         {testResult && (
           <div
-            className={`p-4 rounded-xl border text-xs space-y-1 mt-4 ${
-              testResult.success
+            className={`p-4 rounded-xl border text-xs space-y-1 mt-4 ${testResult.success
                 ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
                 : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
-            }`}
+              }`}
           >
             <div className="font-semibold flex items-center justify-between">
               <span className="flex items-center gap-1.5">

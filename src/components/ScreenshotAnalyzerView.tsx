@@ -37,7 +37,7 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
 
-  // Helper to load image file into preview
+  // Helper to load image file into preview and standardize resolution for AI Vision
   const loadImageFile = (file: File) => {
     if (!file.type.startsWith('image/')) {
       setErrorMessage('Please upload or paste a valid image file (PNG, JPG, WEBP).');
@@ -45,9 +45,37 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
     }
     const reader = new FileReader();
     reader.onload = (event) => {
-      setImagePreview(event.target?.result as string);
-      setErrorMessage(null);
-      setSignalResult(null);
+      const rawDataUrl = event.target?.result as string;
+      if (!rawDataUrl) return;
+
+      // Rescale high-res uploads to crisp standard 1280x720 canvas if needed
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const maxW = 1280;
+        const maxH = 720;
+        let width = img.width;
+        let height = img.height;
+
+        if (width > maxW || height > maxH) {
+          const ratio = Math.min(maxW / width, maxH / height);
+          width = Math.round(width * ratio);
+          height = Math.round(height * ratio);
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, width, height);
+          setImagePreview(canvas.toDataURL('image/jpeg', 0.9));
+        } else {
+          setImagePreview(rawDataUrl);
+        }
+        setErrorMessage(null);
+        setSignalResult(null);
+      };
+      img.src = rawDataUrl;
     };
     reader.readAsDataURL(file);
   };
@@ -214,11 +242,10 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
                 <button
                   onClick={runVisionAnalysis}
                   disabled={analyzing || !geminiConnected}
-                  className={`flex-1 py-2.5 px-4 rounded-lg font-semibold text-xs flex items-center justify-center gap-2 transition-all ${
-                    analyzing || !geminiConnected
+                  className={`flex-1 py-2.5 px-4 rounded-lg font-semibold text-xs flex items-center justify-center gap-2 transition-all ${analyzing || !geminiConnected
                       ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
                       : 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-lg shadow-cyan-500/20'
-                  }`}
+                    }`}
                 >
                   {analyzing ? (
                     <>
@@ -263,13 +290,12 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
                   <span className="text-xs text-slate-400 font-medium">NEXT-CANDLE SIGNAL</span>
                   <div className="flex items-center gap-3 mt-1">
                     <span
-                      className={`text-3xl font-black font-mono px-4 py-1 rounded-lg ${
-                        signalResult.signal === 'CALL'
+                      className={`text-3xl font-black font-mono px-4 py-1 rounded-lg ${signalResult.signal === 'CALL'
                           ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
                           : signalResult.signal === 'PUT'
-                          ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
-                          : 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
-                      }`}
+                            ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
+                            : 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
+                        }`}
                     >
                       {signalResult.signal}
                     </span>
@@ -328,13 +354,12 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
                         <div className="flex items-center gap-2 shrink-0">
                           <span className="text-[10px] text-slate-400 truncate max-w-[160px]">{item.detail}</span>
                           <span
-                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                              item.status === 'PASSED'
+                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${item.status === 'PASSED'
                                 ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
                                 : item.status === 'FAILED'
-                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                                : 'bg-slate-800 text-slate-400'
-                            }`}
+                                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                                  : 'bg-slate-800 text-slate-400'
+                              }`}
                           >
                             {item.status}
                           </span>

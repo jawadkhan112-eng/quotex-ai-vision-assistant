@@ -104,3 +104,6 @@ export async function safeFetch<T = any>(
     clearTimeout(id);
   }
 }
+
+// Backward-compatibility alias for safeApiRequest
+export const safeApiRequest = safeFetch;

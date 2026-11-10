@@ -11,7 +11,7 @@ export async function askVoiceAssistant(
   const aiConfig = getActiveAiConfig(providerOverride);
   const provider = providerOverride || aiConfig.provider || 'gemini';
   const apiKey = apiKeyOverride || aiConfig.apiKey;
-  const model = modelOverride || aiConfig.model || (provider === 'gemini' ? 'gemini-1.5-flash' : 'llama-3.3-70b-versatile');
+  const model = modelOverride || aiConfig.model || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama-3.3-70b-versatile');
 
   if (!apiKey) {
     return 'Voice assistant is ready. However, no AI API key is configured. Please add your key in Settings -> AI/API Configuration.';
@@ -29,6 +29,45 @@ ${JSON.stringify(contextData || {}, null, 2)}`;
 
   try {
     if (provider === 'gemini') {
+      const candidateModels = Array.from(new Set([
+        model,
+        'gemini-2.5-flash',
+        'gemini-2.0-flash',
+        'gemini-1.5-flash',
+        'gemini-1.5-flash-latest',
+        'gemini-1.5-pro',
+      ])).filter(Boolean);
+
+      // Attempt REST endpoints first to avoid 404 SDK version mismatch
+      for (const m of candidateModels) {
+        const endpoints = [
+          `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`,
+          `https://generativelanguage.googleapis.com/v1/models/${m}:generateContent?key=${apiKey}`,
+        ];
+        for (const url of endpoints) {
+          try {
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                systemInstruction: { parts: [{ text: systemInstruction }] },
+                contents: [{ parts: [{ text: userQuery }] }],
+                generationConfig: { temperature: 0.3, maxOutputTokens: 300 },
+              }),
+              signal: AbortSignal.timeout(15000),
+            });
+            if (res.ok) {
+              const data = await res.json() as any;
+              const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (text) return text;
+            }
+          } catch {
+            // continue fallback
+          }
+        }
+      }
+
+      // SDK fallback
       const ai = new GoogleGenAI({
         apiKey,
         httpOptions: {
@@ -51,8 +90,8 @@ ${JSON.stringify(contextData || {}, null, 2)}`;
       const endpoint = provider === 'groq'
         ? 'https://api.groq.com/openai/v1/chat/completions'
         : provider === 'openrouter'
-        ? 'https://openrouter.ai/api/v1/chat/completions'
-        : 'https://api.openai.com/v1/chat/completions';
+          ? 'https://openrouter.ai/api/v1/chat/completions'
+          : 'https://api.openai.com/v1/chat/completions';
 
       const res = await fetch(endpoint, {
         method: 'POST',

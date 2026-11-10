@@ -106,7 +106,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </span>
             )}
           </div>
-          <p className="text-[11px] text-slate-400">Model: gemini-3.8-flash</p>
+          <p className="text-[11px] text-slate-400">Model: Gemini 2.5 Flash</p>
         </div>
       </div>
 

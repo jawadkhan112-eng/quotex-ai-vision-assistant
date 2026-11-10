@@ -35,22 +35,31 @@ export interface VisionAnalysisResult {
   latencyMs?: number;
 }
 
-const VISION_SYSTEM_PROMPT = `You are a world-class senior quantitative AI chart vision analyst specializing in binary options and live price-action charts (Quotex, IQ, TradingView).
+const VISION_SYSTEM_PROMPT = `You are a world-class senior quantitative AI chart vision analyst specializing in high-precision binary options and price-action charts (Quotex, IQ, TradingView).
 You analyze ONLY the visual screenshot or screen capture provided. DO NOT rely on or assume any external market data feeds.
 
-Perform a rigorous, objective visual inspection of this trading chart screenshot:
-1. Candlestick Anatomy: Body ratio, upper wick rejection, lower wick rejection, forming candle close proximity.
-2. Market Trend & Momentum: Higher highs/higher lows vs lower highs/lower lows, trend slopes, market structure breaks.
-3. Visible Support & Resistance: Key swing highs/lows, rejection levels, recent test/retest zones.
-4. Visible Indicators: Moving averages crossover, RSI level, MACD histogram, Bollinger Band touches (ONLY if actually visible on chart).
-5. Chart Legibility: Check if candlesticks, prices, and timeframe are clear or blurry/obstructed.
-6. Next-Candle Direction: Determine optimal next-candle outcome ('CALL', 'PUT', or 'WAIT') for 1-minute or 5-minute expiry.
+Execute a rigorous, institutional-grade binary options inspection of the chart frame:
+1. Candlestick Anatomy & Rejection Analysis:
+   - Precisely measure recent closed and currently forming candles: body-to-wick ratios, upper/lower rejection wicks (demonstrating buyer absorption vs seller exhaustion).
+   - Identify high-probability setups: pin bars, rejection hammers/shooting stars, engulfing patterns, railway tracks, inside bars.
+2. Market Trend & Momentum Vectors:
+   - Identify higher-high/higher-low vs lower-high/lower-low structure, trend angle/slope, and exhaustion vs expansion momentum.
+3. Support & Resistance (S/R) Zones:
+   - Pinpoint critical psychological price boundaries, round numbers, recent swing highs/lows, and horizontal consolidation ceilings/floors.
+4. Visible Chart Indicators:
+   - Detect moving averages (EMA/SMA slopes and crossovers), Bollinger Band squeezes/touches, RSI momentum divergence, or MACD histograms ONLY if genuinely visible in the image.
+5. Chart Legibility & Quality:
+   - Evaluate whether candlesticks, price scales, and timeframes are sharp or blurry/obstructed.
+6. Next-Candle Precision Decision:
+   - CALL: Bullish continuation or clean bounce off validated support with seller rejection wick.
+   - PUT: Bearish continuation or clean rejection drop off validated resistance ceiling with buyer rejection wick.
+   - WAIT: Default state when consolidation is tight, opposing forces/barriers exist, indicators conflict, or chart clarity is low.
 
-STRICT SIGNAL GENERATION RULE:
+STRICT SIGNAL GENERATION RULES:
 - Output 'CALL' ONLY if evidence is strongly bullish with clear rejection off support or momentum breakout with no major opposing resistance.
 - Output 'PUT' ONLY if evidence is strongly bearish with clear rejection off resistance or momentum breakdown with no major opposing support.
 - Output 'WAIT' if chart readability is poor, evidence quality is insufficient (< 60/100), or contradictory evidence exists.
-- 'WAIT' MUST be the default state when in doubt. NEVER guess or fabricate unreadable indicators.
+- 'WAIT' MUST be the default state when in doubt. NEVER guess or fabricate unreadable indicators or win rates.
 
 Return ONLY a valid JSON object matching this schema:
 {
@@ -58,8 +67,9 @@ Return ONLY a valid JSON object matching this schema:
   "chartReadable": boolean,
   "evidenceQuality": number (0-100),
   "trend": "STRONG_BULLISH" | "BULLISH" | "NEUTRAL_SIDEWAYS" | "BEARISH" | "STRONG_BEARISH" | "UNKNOWN",
-  "momentum": "ACCELERATING_UP" | "ACCELERATING_DOWN" | "DECELEATRING" | "CONSOLIDATING" | "NEUTRAL",
+  "momentum": "ACCELERATING_UP" | "ACCELERATING_DOWN" | "DECELERATING" | "CONSOLIDATING" | "NEUTRAL",
   "candleObservation": string,
+  "candlestickPattern": string,
   "visibleIndicators": string[],
   "supportResistance": string,
   "reasons": string[],
@@ -67,7 +77,18 @@ Return ONLY a valid JSON object matching this schema:
   "conflicts": string[],
   "missingData": string[],
   "invalidation": string,
-  "riskNotes": string
+  "entryTiming": string,
+  "expiryEstimate": string,
+  "riskNotes": string,
+  "checklist": {
+    "trendConfirmed": boolean,
+    "candleStructureConfirmed": boolean,
+    "momentumConfirmed": boolean,
+    "supportResistanceConfirmed": boolean,
+    "patternConfirmed": boolean,
+    "visibleIndicatorConfirmed": boolean,
+    "multiCandleConfirmed": boolean
+  }
 }`;
 
 /**
@@ -86,7 +107,7 @@ export async function analyzeChartImage(
   const aiConfig = getActiveAiConfig(userProvider);
   const provider = userProvider || aiConfig.provider || 'gemini';
   const apiKey = aiConfig.apiKey;
-  const modelToUse = userModel || aiConfig.model || (provider === 'gemini' ? 'gemini-1.5-flash' : 'llama-3.2-11b-vision-preview');
+  const modelToUse = userModel || aiConfig.model || (provider === 'gemini' ? 'gemini-2.5-flash' : 'llama-3.2-11b-vision-preview');
 
   if (!apiKey) {
     throw new Error(`No API key configured for provider '${provider}'. Please check AI Settings or set the environment variable.`);
@@ -96,7 +117,7 @@ export async function analyzeChartImage(
   const catalogEntry = PROVIDER_CATALOG.find((p) => p.id === provider);
   const modelDef = catalogEntry?.supportedModels.find((m) => m.id === modelToUse);
   if (modelDef && !modelDef.vision) {
-    throw new Error(`Selected model '${modelToUse}' is text-only and does not support image/vision analysis. Please select a vision model such as 'gemini-1.5-flash', 'gemini-1.5-pro', or 'claude-3.5-sonnet'.`);
+    throw new Error(`Selected model '${modelToUse}' is text-only and does not support image/vision analysis. Please select a vision model such as 'gemini-2.5-flash', 'gemini-2.0-flash', or 'claude-3.5-sonnet'.`);
   }
 
   // Strip base64 prefix if present
@@ -109,7 +130,7 @@ export async function analyzeChartImage(
       return await analyzeWithOpenAICompatible(cleanBase64, mimeType, symbol, timeframe, modelToUse, apiKey, provider, start);
     } else {
       // Default to Gemini
-      return await analyzeWithGemini(cleanBase64, mimeType, symbol, timeframe, 'gemini-1.5-flash', apiKey, start);
+      return await analyzeWithGemini(cleanBase64, mimeType, symbol, timeframe, 'gemini-2.5-flash', apiKey, start);
     }
   } catch (err: any) {
     // If primary provider failed and backup provider is configured, attempt fallback
@@ -133,109 +154,169 @@ async function analyzeWithGemini(
   mimeType: string,
   symbol: string,
   timeframe: string,
-  modelToUse: string,
+  requestedModel: string,
   apiKey: string,
   start: number
 ): Promise<VisionAnalysisResult> {
-  const ai = new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'quotex-ai-vision-assistant/1.0',
-      },
-    },
-  });
-
   const prompt = `${VISION_SYSTEM_PROMPT}\n\nChart Metadata: Symbol: "${symbol}", Timeframe: "${timeframe}".`;
 
-  const response = await ai.models.generateContent({
-    model: modelToUse,
-    contents: {
-      parts: [
-        {
-          inlineData: {
-            mimeType,
-            data: cleanBase64,
+  // Candidate models cascade to guarantee 404 resilience across active Gemini endpoints
+  const candidateModels = Array.from(new Set([
+    requestedModel,
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-latest',
+    'gemini-1.5-pro',
+  ])).filter(Boolean);
+
+  let lastError: any = null;
+
+  // Attempt 1: Direct modern REST endpoint (supports standard v1 and v1beta paths without SDK model name mismatches)
+  for (const model of candidateModels) {
+    const endpoints = [
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`,
+    ];
+
+    for (const url of endpoints) {
+      try {
+        const restResponse = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': 'quotex-ai-vision-assistant/1.0',
+          },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType,
+                      data: cleanBase64,
+                    },
+                  },
+                  { text: prompt },
+                ],
+              },
+            ],
+            generationConfig: {
+              responseMimeType: 'application/json',
+              temperature: 0.1,
+            },
+          }),
+          signal: AbortSignal.timeout(30000),
+        });
+
+        if (restResponse.ok) {
+          const data = await restResponse.json() as any;
+          const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+          const parsed = JSON.parse(rawText) as VisionAnalysisResult;
+
+          if (!['CALL', 'PUT', 'WAIT'].includes(parsed.signal)) {
+            parsed.signal = 'WAIT';
+          }
+          if (!parsed.chartReadable || (parsed.evidenceQuality || 0) < 60) {
+            parsed.signal = 'WAIT';
+          }
+
+          if (!parsed.checklist) {
+            parsed.checklist = {
+              trendConfirmed: parsed.trend?.includes('BULLISH') || parsed.trend?.includes('BEARISH') || false,
+              candleStructureConfirmed: Boolean(parsed.candleObservation),
+              momentumConfirmed: !parsed.momentum?.includes('CONSOLIDATING'),
+              supportResistanceConfirmed: Boolean(parsed.supportResistance),
+              patternConfirmed: Boolean(parsed.candlestickPattern),
+              visibleIndicatorConfirmed: (parsed.visibleIndicators?.length ?? 0) > 0,
+              multiCandleConfirmed: true,
+            };
+          }
+
+          parsed.providerUsed = 'gemini';
+          parsed.modelUsed = model;
+          parsed.latencyMs = Date.now() - start;
+          return parsed;
+        } else {
+          const errText = await restResponse.text().catch(() => '');
+          lastError = new Error(`Gemini HTTP ${restResponse.status} for ${model}: ${errText.slice(0, 200)}`);
+          // If not 404, throw or keep going
+          if (restResponse.status !== 404) {
+            console.warn(`[GeminiVision] REST error for ${model} (${restResponse.status}):`, errText.slice(0, 160));
+          }
+        }
+      } catch (reqErr: any) {
+        lastError = reqErr;
+      }
+    }
+  }
+
+  // Attempt 2: SDK fallback (@google/genai)
+  for (const model of candidateModels) {
+    try {
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'quotex-ai-vision-assistant/1.0',
           },
         },
-        { text: prompt },
-      ],
-    },
-    config: {
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          signal: { type: Type.STRING, description: 'CALL, PUT, or WAIT' },
-          chartReadable: { type: Type.BOOLEAN, description: 'Whether the chart candlesticks and prices are clearly visible' },
-          evidenceQuality: { type: Type.INTEGER, description: 'Score from 0 to 100 based on clarity and confluence' },
-          trend: { type: Type.STRING, description: 'Primary visible trend' },
-          momentum: { type: Type.STRING, description: 'Visible candle momentum' },
-          candleObservation: { type: Type.STRING, description: 'Detailed observation of recent 1-3 candles' },
-          visibleIndicators: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: 'List of visible technical indicators on chart',
-          },
-          supportResistance: { type: Type.STRING, description: 'Key visible support/resistance zones' },
-          reasons: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: 'Supporting reasons for the signal decision',
-          },
-          opposingEvidence: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: 'Risks or arguments against the signal',
-          },
-          conflicts: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: 'Conflicting visual clues',
-          },
-          missingData: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: 'Information not clearly visible on screenshot',
-          },
-          invalidation: { type: Type.STRING, description: 'Price condition that invalidates this setup' },
-          riskNotes: { type: Type.STRING, description: 'Crucial risk management note' },
+      });
+
+      const response = await ai.models.generateContent({
+        model,
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                mimeType,
+                data: cleanBase64,
+              },
+            },
+            { text: prompt },
+          ],
         },
-        required: [
-          'signal',
-          'chartReadable',
-          'evidenceQuality',
-          'trend',
-          'momentum',
-          'candleObservation',
-          'visibleIndicators',
-          'supportResistance',
-          'reasons',
-          'opposingEvidence',
-          'conflicts',
-          'missingData',
-          'invalidation',
-          'riskNotes',
-        ],
-      },
-    },
-  });
+        config: {
+          responseMimeType: 'application/json',
+          temperature: 0.1,
+        },
+      });
 
-  const jsonText = response.text || '{}';
-  const parsed = JSON.parse(jsonText) as VisionAnalysisResult;
+      const jsonText = response.text || '{}';
+      const parsed = JSON.parse(jsonText) as VisionAnalysisResult;
 
-  if (!['CALL', 'PUT', 'WAIT'].includes(parsed.signal)) {
-    parsed.signal = 'WAIT';
+      if (!['CALL', 'PUT', 'WAIT'].includes(parsed.signal)) {
+        parsed.signal = 'WAIT';
+      }
+      if (!parsed.chartReadable || (parsed.evidenceQuality || 0) < 60) {
+        parsed.signal = 'WAIT';
+      }
+
+      if (!parsed.checklist) {
+        parsed.checklist = {
+          trendConfirmed: parsed.trend?.includes('BULLISH') || parsed.trend?.includes('BEARISH') || false,
+          candleStructureConfirmed: Boolean(parsed.candleObservation),
+          momentumConfirmed: !parsed.momentum?.includes('CONSOLIDATING'),
+          supportResistanceConfirmed: Boolean(parsed.supportResistance),
+          patternConfirmed: Boolean(parsed.candlestickPattern),
+          visibleIndicatorConfirmed: (parsed.visibleIndicators?.length ?? 0) > 0,
+          multiCandleConfirmed: true,
+        };
+      }
+
+      parsed.providerUsed = 'gemini';
+      parsed.modelUsed = model;
+      parsed.latencyMs = Date.now() - start;
+      return parsed;
+    } catch (sdkErr: any) {
+      lastError = sdkErr;
+      if (!sdkErr.message?.includes('404') && !sdkErr.message?.includes('not found')) {
+        break;
+      }
+    }
   }
-  if (!parsed.chartReadable || parsed.evidenceQuality < 60) {
-    parsed.signal = 'WAIT';
-  }
 
-  parsed.providerUsed = 'gemini';
-  parsed.modelUsed = modelToUse;
-  parsed.latencyMs = Date.now() - start;
-
-  return parsed;
+  throw lastError || new Error('All Gemini model endpoints failed (404/unavailable). Please verify API key permissions in Google AI Studio or switch to Groq/OpenRouter.');
 }
 
 async function analyzeWithOpenAICompatible(

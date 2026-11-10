@@ -90,7 +90,7 @@ export function initDb() {
   // Insert default settings if missing
   const setStmt = db.prepare('INSERT OR IGNORE INTO user_settings (key, value) VALUES (?, ?)');
   setStmt.run('ai_provider', 'gemini');
-  setStmt.run('model_name', 'gemini-1.5-flash');
+  setStmt.run('model_name', 'gemini-2.5-flash');
   setStmt.run('default_symbol', 'EUR/USD (OTC)');
   setStmt.run('default_timeframe', '1M');
   setStmt.run('auto_save_screenshots', 'true');

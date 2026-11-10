@@ -88,6 +88,9 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: {
+          width: { ideal: 1280, max: 1920 },
+          height: { ideal: 720, max: 1080 },
+          frameRate: { ideal: 30, max: 60 },
           cursor: 'always',
           displaySurface: 'browser', // Suggest browser tab selection
         } as any,
@@ -97,7 +100,7 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
       mediaStreamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        videoRef.current.play().catch(() => {});
+        videoRef.current.play().catch(() => { });
       }
 
       setStreamActive(true);
@@ -294,7 +297,7 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
     const handleVisibilityChange = () => {
       if (!document.hidden && videoRef.current && mediaStreamRef.current) {
         videoRef.current.srcObject = mediaStreamRef.current;
-        videoRef.current.play().catch(() => {});
+        videoRef.current.play().catch(() => { });
       }
     };
 
@@ -347,11 +350,10 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
 
               <button
                 onClick={toggleAutoMonitoring}
-                className={`px-3.5 py-2 text-xs font-semibold rounded-lg border flex items-center gap-1.5 transition-colors ${
-                  autoAnalysisActive
+                className={`px-3.5 py-2 text-xs font-semibold rounded-lg border flex items-center gap-1.5 transition-colors ${autoAnalysisActive
                     ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse'
                     : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30'
-                }`}
+                  }`}
               >
                 <Zap className="w-3.5 h-3.5" /> {autoAnalysisActive ? 'Pause Auto Monitoring' : 'Start Auto Monitoring'}
               </button>
@@ -432,13 +434,12 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
                     <span className="text-[10px] text-slate-400 uppercase font-mono tracking-wider">NEXT-CANDLE SIGNAL</span>
                     <div className="flex items-center gap-3 mt-1">
                       <span
-                        className={`text-2xl font-black font-mono px-3.5 py-1 rounded-lg ${
-                          signalResult.signal === 'CALL'
+                        className={`text-2xl font-black font-mono px-3.5 py-1 rounded-lg ${signalResult.signal === 'CALL'
                             ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
                             : signalResult.signal === 'PUT'
-                            ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
-                            : 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
-                        }`}
+                              ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40'
+                              : 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
+                          }`}
                       >
                         {signalResult.signal}
                       </span>
@@ -499,13 +500,12 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
                           <div className="flex items-center gap-2 shrink-0">
                             <span className="text-[10px] text-slate-400 truncate max-w-[160px]">{item.detail}</span>
                             <span
-                              className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                                item.status === 'PASSED'
+                              className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${item.status === 'PASSED'
                                   ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
                                   : item.status === 'FAILED'
-                                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                                  : 'bg-slate-800 text-slate-400'
-                              }`}
+                                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                                    : 'bg-slate-800 text-slate-400'
+                                }`}
                             >
                               {item.status}
                             </span>
@@ -630,21 +630,20 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
                 >
                   <span className="text-slate-500 shrink-0">{log.timestamp}</span>
                   <span
-                    className={`font-bold shrink-0 ${
-                      log.type === 'SIGNAL'
+                    className={`font-bold shrink-0 ${log.type === 'SIGNAL'
                         ? log.signal === 'CALL'
                           ? 'text-emerald-400'
                           : log.signal === 'PUT'
-                          ? 'text-rose-400'
-                          : 'text-amber-400'
+                            ? 'text-rose-400'
+                            : 'text-amber-400'
                         : log.type === 'ERROR'
-                        ? 'text-rose-400'
-                        : log.type === 'WARN'
-                        ? 'text-amber-400'
-                        : log.type === 'ANALYSIS'
-                        ? 'text-cyan-400'
-                        : 'text-slate-400'
-                    }`}
+                          ? 'text-rose-400'
+                          : log.type === 'WARN'
+                            ? 'text-amber-400'
+                            : log.type === 'ANALYSIS'
+                              ? 'text-cyan-400'
+                              : 'text-slate-400'
+                      }`}
                   >
                     [{log.type}]
                   </span>
