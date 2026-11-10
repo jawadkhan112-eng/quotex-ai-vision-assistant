@@ -62,22 +62,25 @@ export function normalizeUiModelToApiSlug(uiModel?: string, provider = 'gemini')
     if (lower.includes('3.5 flash') || lower.includes('3.5')) {
       return 'gemini-3.5-flash';
     }
-    // 2.x parity
-    if (lower.includes('2.5 flash') || lower.includes('2.5')) {
-      return 'gemini-2.5-flash';
+    // 2.x parity — intentionally omitted: we do NOT silently map to gemini-2.5-flash.
+    // User-selected model names are preserved exactly; caller decides fallback.
+    // if (lower.includes('2.5 flash') || lower.includes('2.5')) {
+    //   return 'gemini-2.5-flash';
+    // }
+    // if (lower.includes('2.0 flash') || lower.includes('2.0')) {
+    //   return 'gemini-2.0-flash';
+    // }
+    // if (lower.includes('1.5 pro') || lower.includes('1.5 pro')) {
+    //   return 'gemini-1.5-pro';
+    // }
+    // if (lower.includes('1.5 flash') || lower.includes('1.5')) {
+    //   return 'gemini-1.5-flash';
+    // }
+    // Fallback for any ambiguous gemini label — preserve user selection exactly.
+    if (lower.includes('flash') || lower.includes('pro') || lower.includes('argon')) {
+      return uiModel || '';
     }
-    if (lower.includes('2.0 flash') || lower.includes('2.0')) {
-      return 'gemini-2.0-flash';
-    }
-    if (lower.includes('1.5 pro') || lower.includes('1.5 pro')) {
-      return 'gemini-1.5-pro';
-    }
-    if (lower.includes('1.5 flash') || lower.includes('1.5')) {
-      return 'gemini-1.5-flash';
-    }
-    // Fallback for any ambiguous gemini label
-    if (lower.includes('flash')) {
-      return 'gemini-2.5-flash';
+    return uiModel || '';mini-2.5-flash';
     }
     return 'gemini-2.5-flash';
   }
