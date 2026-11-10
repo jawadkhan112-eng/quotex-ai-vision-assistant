@@ -34,7 +34,7 @@ export class ApiError extends Error {
 export async function safeFetch<T = any>(
   url: string,
   options: RequestInit = {},
-  timeoutMs = 30000
+  timeoutMs = 60000
 ): Promise<T> {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);

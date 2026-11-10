@@ -196,9 +196,14 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
 
     if (video.readyState < 2) return null;
 
-    // Scale to standard HD resolution for optimal AI latency & cost
-    const targetWidth = Math.min(1280, video.videoWidth || 1280);
-    const targetHeight = Math.min(720, video.videoHeight || 720);
+    // Compress captured frame: max width 1024px, JPEG quality 0.75.
+    // Aspect ratio is preserved to avoid distorting the chart candles/UI.
+    const MAX_WIDTH = 1024;
+    const sourceWidth = video.videoWidth || MAX_WIDTH;
+    const sourceHeight = video.videoHeight || MAX_WIDTH;
+    const scale = Math.min(1, MAX_WIDTH / sourceWidth);
+    const targetWidth = Math.max(1, Math.floor(sourceWidth * scale));
+    const targetHeight = Math.max(1, Math.floor(sourceHeight * scale));
 
     canvas.width = targetWidth;
     canvas.height = targetHeight;
@@ -207,7 +212,7 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
     if (!ctx) return null;
 
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.75);
 
     // Lightweight fingerprint of frame based on sample byte slice
     const hash = dataUrl.slice(100, 300);
