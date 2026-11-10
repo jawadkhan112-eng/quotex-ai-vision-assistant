@@ -12,8 +12,9 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
   const [active, setActive] = useState(false);
   const [auto, setAuto] = useState(false);
   const [working, setWorking] = useState(false);
-  const [result, setResult] = useState<AlgoAnalysisResult | null>(null);
-  const [error, setError] = useState('');
+  const [countdown, setCountdown] = useState(0);
+  const [showFlashing, setShowFlashing] = useState(false);
+  const [lastCandleTime, setLastCandleTime] = useState<Date | null>(null);
 
   useEffect(() => {
     if (active && video.current && stream.current) video.current.srcObject = stream.current;
@@ -40,8 +41,27 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
   useEffect(() => {
     if (!auto) return;
     void run();
-    const timer = window.setInterval(() => void run(), 5000);
+    const timer = window.setInterval(() => void run(), 1000); // High-frequency 1-second polling when auto monitoring
     return () => window.clearInterval(timer);
+  }, [auto, run]);
+  // Candle closure timer - synchronizes with 1M candle closure at final 10 seconds
+  useEffect(() => {
+    if (!auto) return;
+    const updateCountdown = () => {
+      const now = new Date();
+      const seconds = now.getSeconds();
+      const toClosure = 60 - seconds;
+      const msUntilClosure = toClosure * 1000;
+      setCountdown(msUntilClosure);
+      // Trigger analysis in the final 10 seconds of the candle
+      if (msUntilClosure <= 10000 && msUntilClosure > 0) {
+        setLastCandleTime(new Date());
+        void run();
+      }
+    };
+    updateCountdown(); // Initial call
+    const interval = setInterval(updateCountdown, 1000);
+    return () => clearInterval(interval);
   }, [auto, run]);
 
   const start = async () => {
@@ -56,7 +76,7 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
   return <section className="mx-auto max-w-7xl p-5 lg:p-8">
     <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
       <div><p className="font-mono text-[11px] uppercase tracking-[.24em] text-cyan-400">Local / deterministic / zero API keys</p><h2 className="mt-2 text-2xl font-bold tracking-tight">Algorithmic Trading & Technical Analysis Terminal</h2></div>
-      <button onClick={() => setAuto((value) => !value)} className="border border-cyan-400/40 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-200">{auto ? 'Auto Math Monitoring: ON' : 'Start Auto Math Monitoring'}</button>
+      <button onClick={() => setAuto((value) => !value)} className="border border-cyan-400/40 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-200"><span className="text-sm font-medium text-cyan-200">{result.confidenceScore}% Sureshot</span></button>
     </div>
     <div className="grid gap-5 lg:grid-cols-[1.25fr_.75fr]">
       <div className="border border-slate-800 bg-slate-900/70 p-5"><div className="flex items-center justify-between border-b border-slate-800 pb-3"><span className="text-sm font-semibold">Chart frame input</span><span className="font-mono text-xs text-slate-400">{selectedSymbol} · {selectedTimeframe}</span></div>
