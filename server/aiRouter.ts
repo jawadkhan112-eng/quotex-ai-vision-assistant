@@ -5,13 +5,174 @@
  * 1. Dynamic Model Normalization: maps legacy, partial, or user-selected model strings
  *    (e.g., "gemini-1.5-pro", "Gemini 1.5 Flash", "anthropic/claude-3.5-sonnet") to currently active,
  *    live, vision-capable model identifiers across Gemini, Groq, OpenRouter, OpenAI, and Anthropic.
- * 2. Strict Vision Safety Check: guarantees that incoming base64 screen frames are only sent
- *    to models with true multimodal/vision support. If a text-only model is requested, it seamlessly
- *    reroutes to the premier vision model of that provider.
+ * 2. Strict Vision Safety Check: validates that the user-selected model supports multimodal image input.
+ *    If a text-only model is selected, this function returns isVisionSupported: false so the caller
+ *    can return a clear, user-friendly error instead of sending a text-only model to an image analysis.
  * 3. Strict User-Selected Model Lock: only the exact provider and model chosen by the user are queried.
  *    No automatic fallback to third-party or backup providers is performed. If the selected model fails,
  *    a clean descriptive error is returned instead of silently routing elsewhere.
  */
+
+/**
+ * Normalized model selection result from the AI Router.
+ */
+export interface NormalizedModelSelection {
+  provider: string;
+  model: string;
+  isVisionSupported: boolean;
+  normalizedName: string;
+}
+
+/**
+ * Maps every known UI-friendly model label into its official Google AI Studio / provider API slug.
+ *
+ * This is the canonical "UI label → API slug" resolver used before any API call.
+ * It guarantees that human-entered model names (e.g. "Gemini 3.8 Flash", "Gemini 4 Argon")
+ * are translated to the exact model ID the provider endpoint expects, preventing 404 / NOT_FOUND
+ * errors caused by sending raw UI strings directly to the API.
+ *
+ * @param uiModel The model string as displayed in the UI or supplied by the user
+ * @param provider The provider slug (e.g. 'gemini', 'openrouter', 'groq', 'anthropic', 'deepseek', 'ollama')
+ * @returns The official API model ID (e.g. 'gemini-3.8-flash', 'gemini-2.5-flash')
+ */
+export function normalizeUiModelToApiSlug(uiModel?: string, provider = 'gemini'): string {
+  const lower = (uiModel || '').toLowerCase().trim();
+
+  // ---- Google Gemini AI Studio (primary target) ----
+  if (provider === 'gemini' || !provider || provider === 'google' || provider === 'googleai') {
+    // Latest 3.x series
+    if (lower.includes('4 argon') || lower.includes('4 argon')) {
+      return 'gemini-4-flash';
+    }
+    if (lower.includes('3.6 flash') || lower.includes('3.6')) {
+      return 'gemini-3.6-flash';
+    }
+    if (lower.includes('3.5 flash lite') || lower.includes('3.5 flash') || lower.includes('3.5')) {
+      return 'gemini-3.5-flash';
+    }
+    if (lower.includes('3.8 flash') || lower.includes('3.8')) {
+      return 'gemini-3.8-flash';
+    }
+    if (lower.includes('3.7 flash') || lower.includes('3.7')) {
+      return 'gemini-3.7-flash';
+    }
+    if (lower.includes('3.6 flash') || lower.includes('3.6')) {
+      return 'gemini-3.6-flash';
+    }
+    if (lower.includes('3.5 flash') || lower.includes('3.5')) {
+      return 'gemini-3.5-flash';
+    }
+    // 2.x parity
+    if (lower.includes('2.5 flash') || lower.includes('2.5')) {
+      return 'gemini-2.5-flash';
+    }
+    if (lower.includes('2.0 flash') || lower.includes('2.0')) {
+      return 'gemini-2.0-flash';
+    }
+    if (lower.includes('1.5 pro') || lower.includes('1.5 pro')) {
+      return 'gemini-1.5-pro';
+    }
+    if (lower.includes('1.5 flash') || lower.includes('1.5')) {
+      return 'gemini-1.5-flash';
+    }
+    // Fallback for any ambiguous gemini label
+    if (lower.includes('flash')) {
+      return 'gemini-2.5-flash';
+    }
+    return 'gemini-2.5-flash';
+  }
+
+  // ---- OpenRouter ----
+  if (provider === 'openrouter' || provider === 'open router') {
+    if (lower.includes('gemini-4') || lower.includes('4 argon') || lower.includes('4 argono')) {
+      return 'google/gemini-4-flash';
+    }
+    if (lower.includes('gemini-3.6') || lower.includes('3.6')) {
+      return 'google/gemini-3.6-flash';
+    }
+    if (lower.includes('gemini-3.5') || lower.includes('3.5 flash')) {
+      return 'google/gemini-3.5-flash-lite';
+    }
+    if (lower.includes('gemini-3.8') || lower.includes('3.8')) {
+      return 'google/gemini-3.8-flash';
+    }
+    if (lower.includes('gemini-2.5') || lower.includes('2.5') || lower.includes('gemini 2')) {
+      return 'google/gemini-2.5-flash';
+    }
+    if (lower.includes('gemini-1.5') || lower.includes('1.5')) {
+      return 'google/gemini-1.5-flash';
+    }
+    // Generic free/openrouter gemini catchment
+    if (lower.includes('gemini')) return 'google/gemini-2.0-flash-exp';
+    return 'google/gemini-2.0-flash-exp';
+  }
+
+  // ---- Groq ----
+  if (provider === 'groq' || provider === 'groq cloud') {
+    if (lower.includes('llama-3.2-90b') || lower.includes('90b')) {
+      return 'llama-3.2-90b-vision-preview';
+    }
+    if (lower.includes('llama-3.2-11b') || lower.includes('11b')) {
+      return 'llama-3.2-11b-vision-preview';
+    }
+    if (lower.includes('llama-3.3-70b') || lower.includes('70b')) {
+      return 'llama-3.3-70b-versatile';
+    }
+    if (lower.includes('mixtral') || lower.includes('8x7b')) {
+      return 'mixtral-8x7b-32768';
+    }
+    return 'llama-3.2-11b-vision-preview';
+  }
+
+  // ---- Anthropic ----
+  if (provider === 'anthropic' || provider === 'anthropic direct') {
+    if (lower.includes('3.5 sonnet') || lower.includes('3.5')) {
+      return 'claude-3-5-sonnet-20241022';
+    }
+    if (lower.includes('claude-3-7') || lower.includes('3.7')) {
+      return 'claude-3-7-sonnet-20250219';
+    }
+    return 'claude-3-5-sonnet-20241022';
+  }
+
+  // ---- DeepSeek ------
+  if (provider === 'deepseek' || provider === 'deepseek direct') {
+    if (lower.includes('reasoner')) {
+      return 'deepseek-reasoner';
+    }
+    return 'deepseek-chat';
+  }
+
+  // ---- Ollama (Local) ----
+  if (provider === 'ollama' || provider === 'ollama local') {
+    if (lower.includes('vision') || lower.includes('llama3.2')) {
+      return 'llama3.2-vision';
+    }
+    if (lower.includes('llama3.1')) {
+      return 'llama3.1';
+    }
+    return 'llama3.2-vision';
+  }
+
+  // ---- OpenAI (Direct) ----
+  if (provider === 'openai' || provider === 'openai direct') {
+    if (lower.includes('4o-mini')) {
+      return 'gpt-4o-mini';
+    }
+    if (lower.includes('4o')) {
+      return 'gpt-4o';
+    }
+    return 'gpt-4o';
+  }
+
+  // Generic fallback: treat the input as likely an AI Studio gemini label
+  if (lower.includes('gemini') || lower.includes('flash') || lower.includes('pro') || lower.includes('argon')) {
+    return 'gemini-2.5-flash';
+  }
+
+  // If nothing matched, return the raw string as-is so the caller can decide
+  return (uiModel || '').trim() || 'gemini-2.5-flash';
+}
 
 export interface NormalizedModelSelection {
   provider: string;
