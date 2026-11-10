@@ -67,23 +67,23 @@ export function normalizeAiModel(rawModel?: string, rawProvider?: string): Norma
 
   // 2. OpenRouter Normalization
   // Note: anthropic/claude-3.5-sonnet is deprecated/no longer available on standard slugs.
-  // We map to active free or high-performance models (google/gemini-2.0-flash-exp:free or meta-llama/llama-3.2-11b-vision-instruct:free)
+  // We map to active free or high-performance models (meta-llama/llama-3.2-11b-vision-instruct:free or google/gemini-2.5-flash)
   if (provider === 'openrouter') {
     const lower = model.toLowerCase();
     if (lower.includes('claude') || lower.includes('sonnet') || lower.includes('3.5-sonnet')) {
       return {
         provider: 'openrouter',
-        model: 'google/gemini-2.0-flash-exp:free', // Free, active, high-capability vision
+        model: 'meta-llama/llama-3.2-11b-vision-instruct:free', // Free, active, high-capability vision
         isVisionSupported: true,
-        normalizedName: 'Gemini 2.0 Flash (OpenRouter Free)',
+        normalizedName: 'Llama 3.2 11B Vision (OpenRouter Free)',
       };
     }
     if (lower.includes('gemini')) {
       return {
         provider: 'openrouter',
-        model: 'google/gemini-2.0-flash-exp:free',
+        model: 'meta-llama/llama-3.2-11b-vision-instruct:free',
         isVisionSupported: true,
-        normalizedName: 'Gemini 2.0 Flash (OpenRouter Free)',
+        normalizedName: 'Llama 3.2 11B Vision (OpenRouter Free)',
       };
     }
     if (lower.includes('llama') || lower.includes('meta')) {
@@ -105,9 +105,9 @@ export function normalizeAiModel(rawModel?: string, rawProvider?: string): Norma
     // Default openrouter model
     return {
       provider: 'openrouter',
-      model: 'google/gemini-2.0-flash-exp:free',
+      model: 'meta-llama/llama-3.2-11b-vision-instruct:free',
       isVisionSupported: true,
-      normalizedName: 'Gemini 2.0 Flash (OpenRouter Free)',
+      normalizedName: 'Llama 3.2 11B Vision (OpenRouter Free)',
     };
   }
 
@@ -205,8 +205,8 @@ export function getProviderModelCandidates(provider: string, primaryModel?: stri
   if (p === 'openrouter') {
     return Array.from(new Set([
       primaryModel,
-      'google/gemini-2.0-flash-exp:free',
       'meta-llama/llama-3.2-11b-vision-instruct:free',
+      'google/gemini-2.5-flash',
       'openai/gpt-4o',
     ])).filter((m): m is string => Boolean(m && !m.includes('anthropic/claude-3.5-sonnet')));
   }

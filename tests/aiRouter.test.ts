@@ -26,7 +26,7 @@ describe('Universal AI Router & Dynamic Model Mapping Tests', () => {
 
   it('maps deprecated OpenRouter Claude slugs to free/active vision models', () => {
     const claudeDeprecated = normalizeAiModel('anthropic/claude-3.5-sonnet', 'openrouter');
-    expect(claudeDeprecated.model).toBe('google/gemini-2.0-flash-exp:free');
+    expect(claudeDeprecated.model).toBe('meta-llama/llama-3.2-11b-vision-instruct:free');
     expect(claudeDeprecated.isVisionSupported).toBe(true);
 
     const openRouterLlama = normalizeAiModel('llama-3.2-vision', 'openrouter');
@@ -52,7 +52,7 @@ describe('Universal AI Router & Dynamic Model Mapping Tests', () => {
 
     const openRouterCandidates = getProviderModelCandidates('openrouter');
     expect(openRouterCandidates).not.toContain('anthropic/claude-3.5-sonnet');
-    expect(openRouterCandidates).toContain('google/gemini-2.0-flash-exp:free');
+    expect(openRouterCandidates).toContain('meta-llama/llama-3.2-11b-vision-instruct:free');
   });
 
   it('accurately identifies failover-eligible errors (404, 503, 429)', () => {
