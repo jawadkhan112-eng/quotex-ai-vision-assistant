@@ -22,6 +22,9 @@ interface ScreenshotAnalyzerViewProps {
   // User-selected AI provider & model (strict model lock — honored by backend)
   aiProvider: string;
   aiModel: string;
+  // Optional per-request API key (from Web UI localStorage/headers); takes precedence
+  // over DB/custom-environment keys per getActiveAiConfig precedence chain.
+  apiKey?: string;
   onAnalysisComplete: (result: SignalData) => void;
   geminiConnected: boolean;
 }
@@ -31,6 +34,7 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
   selectedTimeframe,
   aiProvider,
   aiModel,
+  apiKey,
   onAnalysisComplete,
   geminiConnected,
 }) => {
@@ -157,6 +161,7 @@ export const ScreenshotAnalyzerView: React.FC<ScreenshotAnalyzerViewProps> = ({
           timeframe: selectedTimeframe,
           provider: aiProvider,
           model: aiModel,
+          apiKey: apiKey,
           base64Image: imagePreview,
         }),
       });

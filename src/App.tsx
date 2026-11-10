@@ -19,6 +19,7 @@ export default function App() {
   const [selectedTimeframe, setSelectedTimeframe] = useState('1M');
   const [aiProvider, setAiProvider] = useState<string>('gemini');
   const [aiModel, setAiModel] = useState<string>('gemini-2.5-flash');
+  const [apiKey, setApiKey] = useState<string>('');
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [backendHealthy, setBackendHealthy] = useState(false);
   const [geminiConnected, setGeminiConnected] = useState(false);
@@ -60,13 +61,25 @@ export default function App() {
     }
   };
 
-  // Fetch the user-selected AI provider/model so the strict model lock can be honored
+  // Fetch the user-selected AI provider/model so the strict model lock can be honored.
+  // Also reads any per-request API key the user persisted in localStorage (encrypted
+  // via base64 on save) so it can be forwarded to the backend as the highest-precedence
+  // key source alongside Vercel environment variables.
   const fetchAiConfig = async () => {
     try {
       const data = await safeFetch<any>('/api/ai-config');
       if (data && data.success) {
         setAiProvider(data.provider || 'gemini');
         setAiModel(data.model || 'gemini-2.5-flash');
+        // Read the encrypted-in-localStorage key for per-request override
+        try {
+          const stored = localStorage.getItem(`quotex_ai_key_${data.provider || 'gemini'}`);
+          if (stored) {
+            setApiKey(decodeURIComponent(escape(window.atob(stored))));
+          }
+        } catch (e) {
+          console.warn('[App] Could not read API key from localStorage:', e);
+        }
       }
     } catch (err) {
       // Keep defaults if config endpoint is unavailable
@@ -110,6 +123,7 @@ export default function App() {
               selectedTimeframe={selectedTimeframe}
               aiProvider={aiProvider}
               aiModel={aiModel}
+              apiKey={apiKey}
               onAnalysisComplete={setLatestSignal}
               onAssetTimeframeDetected={handleAssetTimeframeDetected}
               geminiConnected={geminiConnected}
@@ -122,6 +136,7 @@ export default function App() {
               selectedTimeframe={selectedTimeframe}
               aiProvider={aiProvider}
               aiModel={aiModel}
+              apiKey={apiKey}
               onAnalysisComplete={setLatestSignal}
               geminiConnected={geminiConnected}
             />

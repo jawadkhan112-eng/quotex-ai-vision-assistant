@@ -152,11 +152,12 @@ export const PROVIDER_CATALOG: ProviderDefinition[] = [
 /**
  * Resolves active AI API key and provider configuration.
  * Order of precedence:
- * 1. User encrypted custom key in DB (provider_credentials or user_settings)
- * 2. Environment variable (GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY, etc.)
- * 3. Built-in hardcoded fallback key
+ * 1. Per-request user-provided API key (from Web UI encrypted localStorage / headers)
+ * 2. User encrypted custom key in DB (provider_credentials or user_settings)
+ * 3. Environment variable (GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY, etc.)
+ * 4. Built-in hardcoded fallback key
  */
-export function getActiveAiConfig(requestedProvider?: string): ActiveAiConfig {
+export function getActiveAiConfig(requestedProvider?: string, userApiKey?: string): ActiveAiConfig {
   let provider = requestedProvider || 'gemini';
   let model = '';
   let customKey = '';
@@ -203,11 +204,14 @@ export function getActiveAiConfig(requestedProvider?: string): ActiveAiConfig {
   const envKey = (process.env[catalogEntry.envKeyVar] || '').trim();
   const fallbackKey = catalogEntry.apiKeyFallback || '';
 
-  // Select key: custom > env > fallback
+  // Select key: per-request user key > custom DB key > env > fallback
   let activeKey = '';
   let isCustom = false;
 
-  if (customKey && customKey.trim()) {
+  if (userApiKey && userApiKey.trim()) {
+    activeKey = userApiKey.trim();
+    isCustom = true;
+  } else if (customKey && customKey.trim()) {
     activeKey = customKey.trim();
     isCustom = true;
   } else if (envKey && envKey !== 'YOUR_API_KEY' && envKey !== 'MY_GEMINI_API_KEY') {

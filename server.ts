@@ -209,7 +209,7 @@ app.post('/api/test-gemini', async (req, res) => {
 // USER'S SHARED SCREEN → SCREEN FRAME → AI VISION MODEL → VISUAL CHART ANALYSIS → CONFIRMATION ENGINE → CALL/PUT/WAIT
 app.post('/api/analyze-vision', upload.single('screenshot'), async (req, res) => {
   try {
-    const { symbol = 'EUR/USD (OTC)', timeframe = '1M', base64Image, model, provider } = req.body;
+    const { symbol = 'EUR/USD (OTC)', timeframe = '1M', base64Image, model, provider, apiKey } = req.body;
 
     let imageBuffer: string;
     let mimeType = 'image/png';
@@ -233,7 +233,7 @@ app.post('/api/analyze-vision', upload.single('screenshot'), async (req, res) =>
     const modelToUse = model || aiConfig.model || (providerToUse === 'gemini' ? 'gemini-2.5-flash' : 'llama-3.2-11b-vision-preview');
 
     // 1. Run Pure Vision Analysis on Shared Screen / Screenshot
-    const visionOutput = await analyzeChartImage(imageBuffer, mimeType, symbol, timeframe, modelToUse, providerToUse);
+    const visionOutput = await analyzeChartImage(imageBuffer, mimeType, symbol, timeframe, modelToUse, providerToUse, apiKey);
 
     // 2. Run Visual Confirmation Engine (Checklist & next-candle verification)
     const confirmedSignal = generateVisualConfirmationSignal(visionOutput, timeframe, symbol);

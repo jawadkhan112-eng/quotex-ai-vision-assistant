@@ -8,9 +8,9 @@
  * 2. Strict Vision Safety Check: guarantees that incoming base64 screen frames are only sent
  *    to models with true multimodal/vision support. If a text-only model is requested, it seamlessly
  *    reroutes to the premier vision model of that provider.
- * 3. Automatic Multi-Provider Failover Cascade: catches 404 (Not Found), 503 (High Demand / Overloaded),
- *    429 (Rate Limit), and invalid key errors, cascading through backup models and backup providers
- *    (Gemini -> Groq -> OpenRouter) without crashing the user's live screen-share or manual snapshot.
+ * 3. Strict User-Selected Model Lock: only the exact provider and model chosen by the user are queried.
+ *    No automatic fallback to third-party or backup providers is performed. If the selected model fails,
+ *    a clean descriptive error is returned instead of silently routing elsewhere.
  */
 
 export interface NormalizedModelSelection {

@@ -28,6 +28,9 @@ interface LiveScreenAnalyzerViewProps {
   // User-selected AI provider & model (strict model lock — honored by backend)
   aiProvider: string;
   aiModel: string;
+  // Optional per-request API key (from Web UI localStorage/headers); takes precedence
+  // over DB/custom-environment keys per getActiveAiConfig precedence chain.
+  apiKey?: string;
   onAnalysisComplete: (result: SignalData) => void;
   // Notifies the parent when the vision engine auto-detects the asset/timeframe
   // from the chart UI headers, so manual inputs can be superseded.
@@ -40,6 +43,7 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
   selectedTimeframe,
   aiProvider,
   aiModel,
+  apiKey,
   onAnalysisComplete,
   onAssetTimeframeDetected,
   geminiConnected,
@@ -264,6 +268,7 @@ export const LiveScreenAnalyzerView: React.FC<LiveScreenAnalyzerViewProps> = ({
             timeframe: selectedTimeframe,
             provider: aiProvider,
             model: aiModel,
+            apiKey: apiKey,
             base64Image: frameData,
           }),
         });

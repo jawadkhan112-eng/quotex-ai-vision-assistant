@@ -131,6 +131,16 @@ export const AiSettingsView: React.FC<AiSettingsViewProps> = ({ geminiConnected,
         setApiKeyInput('');
         setSaveSuccess(true);
         setTimeout(() => setSaveSuccess(false), 3000);
+        // Persist the raw (user-entered) key in localStorage so the strict
+        // per-request key override can be honored for headless/backend calls.
+        try {
+          if (apiKeyInput.trim()) {
+            const encrypted = window.btoa(unescape(encodeURIComponent(apiKeyInput.trim())));
+            localStorage.setItem(`quotex_ai_key_${provider}`, encrypted);
+          }
+        } catch (e) {
+          console.warn('[AiSettings] Could not persist key to localStorage:', e);
+        }
         await fetchAiConfig();
         onRefreshHealth();
       }

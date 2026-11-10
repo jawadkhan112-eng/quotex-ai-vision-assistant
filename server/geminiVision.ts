@@ -145,6 +145,7 @@ Return ONLY a valid JSON object matching this schema:
 /**
  * Universal Multimodal Vision Analyzer
  * Dispatches to Google Gemini, Groq Vision, OpenRouter Vision, or OpenAI based on active provider configuration.
+ * Strictly honors the user-selected provider and model — no automatic fallback to third-party providers.
  */
 export async function analyzeChartImage(
   base64Image: string,
@@ -152,10 +153,11 @@ export async function analyzeChartImage(
   symbol = 'EUR/USD (OTC)',
   timeframe = '1M',
   userModel?: string,
-  userProvider?: string
+  userProvider?: string,
+  userApiKey?: string
 ): Promise<VisionAnalysisResult> {
   const start = Date.now();
-  const aiConfig = getActiveAiConfig(userProvider);
+  const aiConfig = getActiveAiConfig(userProvider, userApiKey);
   const rawProvider = userProvider || aiConfig.provider || 'gemini';
   const rawModel = userModel || aiConfig.model || 'gemini-2.5-flash';
 
@@ -164,12 +166,12 @@ export async function analyzeChartImage(
   const primaryProvider = normalized.provider;
   let primaryModel = normalized.model;
 
-  // If selected model is text-only, automatically re-route to standard vision model
+  // If selected model is text-only, automatically re-route to standard vision model of the SAME provider
   if (!normalized.isVisionSupported) {
-    console.warn(`[AI Router] Model '${rawModel}' on '${rawProvider}' is text-only. Seamlessly re-routing to vision model '${primaryModel}'`);
+    console.warn(`[AI Router] Model '${rawModel}' on '${rawProvider}' is text-only. Re-routing to vision model '${primaryModel}' on same provider.`);
   }
 
-  const primaryApiKey = aiConfig.provider === primaryProvider ? aiConfig.apiKey : getActiveAiConfig(primaryProvider).apiKey;
+  const primaryApiKey = aiConfig.provider === primaryProvider ? aiConfig.apiKey : getActiveAiConfig(primaryProvider, userApiKey).apiKey;
 
   // Clean base64 payload
   const cleanBase64 = base64Image.replace(/^data:image\/\w+;base64,/, '');
@@ -388,7 +390,7 @@ async function analyzeWithGemini(
     }
   }
 
-  throw lastError || new Error('All Gemini model endpoints failed (404/unavailable). Please verify API key permissions in Google AI Studio or switch to Groq/OpenRouter.');
+  throw lastError || new Error(`Gemini vision analysis failed for model '${requestedModel}'. Please verify your Gemini API key and model selection in AI Settings. No automatic fallback to other providers is performed.`);
 }
 
 async function analyzeWithOpenAICompatible(
