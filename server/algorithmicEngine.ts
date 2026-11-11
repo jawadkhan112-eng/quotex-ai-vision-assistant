@@ -33,7 +33,23 @@ export interface MtgState {
   lastSignal?: SignalDirection;
   lastOutcome?: 'WIN' | 'LOSS';
   riskWarning?: string;
+  /** Cumulative loss units to recover under the martingale ladder (1, 2, 4 …) */
+  recoveryTarget: number;
+  /** Stricter confluence threshold demanded while a recovery step is active */
+  requiredConfluence: number;
+  /** Stakes ladder for the current recovery sequence (1x, 2x, 4x base stake) */
+  stakeMultiplier: number;
 }
+
+/** Hard gatekeeper: no CALL/PUT leaves the engine below this confluence. */
+export const MIN_CONFIDENCE_THRESHOLD = 80;
+
+/** Required confluence per MTG level — recovery steps demand progressively stricter setups. */
+export const MTG_REQUIRED_CONFLUENCE: Record<MtgLevel, number> = {
+  BASE: MIN_CONFIDENCE_THRESHOLD,
+  MTG_LEVEL_1: 85,
+  MTG_LEVEL_2: 90,
+};
 
 export interface ConfluenceBreakdown {
   rsiExtreme: boolean;
@@ -261,15 +277,22 @@ export function resetMtgState(): void {
 function buildMtg(): MtgState {
   const level: MtgLevel =
     mtgState.failures >= 2 ? 'MTG_LEVEL_2' : mtgState.failures === 1 ? 'MTG_LEVEL_1' : 'BASE';
+  // Martingale ladder: cumulative deficit units (1, 2, 4) and matching stake multipliers.
+  const recoveryTarget = [0, 1, 3][mtgState.failures] ?? 0;
+  const stakeMultiplier = [1, 2, 4][mtgState.failures] ?? 1;
+  const requiredConfluence = MTG_REQUIRED_CONFLUENCE[level];
   return {
     level,
     consecutiveFailures: mtgState.failures,
     lastSignal: mtgState.lastSignal,
     lastOutcome: mtgState.lastOutcome,
+    recoveryTarget,
+    requiredConfluence,
+    stakeMultiplier,
     riskWarning:
       level === 'BASE'
         ? undefined
-        : `Previous signal failed — step ${level}. MTG doubles stake risk; reduce position size or skip after ${level === 'MTG_LEVEL_2' ? 'two' : 'one'} consecutive loss.`,
+        : `Previous signal failed — step ${level}. Recovery target: ${recoveryTarget} units at ${stakeMultiplier}x stake. Stricter ${requiredConfluence}% confluence required; reduce position size or skip after ${level === 'MTG_LEVEL_2' ? 'two' : 'one'} consecutive loss.`,
   };
 }
 
@@ -518,11 +541,29 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
     (candleMetrics !== undefined && candleMetrics.bodyRatio < 0.25 && Math.abs(candleMetrics.upperWickRatio - candleMetrics.lowerWickRatio) < 0.1) ||
     (bb !== undefined && bb.bandwidth < 0.002);
 
-  const signal: SignalDirection = choppy || agrees < 55 ? 'WAIT' : dirBias ?? 'WAIT';
-
   const mtg = buildMtg();
   const confidenceBase = Math.min(98, Math.round(agrees));
-  const confidenceScore = mtg.level === 'BASE' ? confidenceBase : Math.round(confidenceBase * 0.85);
+  const confidenceScore = mtg.level === 'BASE' ? confidenceBase : Math.round(confidenceBase * 0.9);
+
+  // Strict 80%+ high-confidence gatekeeper. A CALL/PUT only leaves the engine when
+  // ALL of the following hold: RSI extreme (<25 / >75), Bollinger outer-band
+  // touch/pierce, prominent rejection wick, non-choppy market, and confluence above
+  // the level-specific threshold (80% base / 85% MTG1 / 90% MTG2).
+  const coreConditionsMet = rsiExtremeStrict && boundaryTouch && strongRejection;
+  const requiredConfluence = MTG_REQUIRED_CONFLUENCE[mtg.level];
+  const gatePassed = coreConditionsMet && !choppy && confidenceScore >= requiredConfluence;
+  const signal: SignalDirection = gatePassed ? dirBias ?? 'WAIT' : 'WAIT';
+  const gateFailureReason = gatePassed
+    ? undefined
+    : !rsiExtremeStrict
+      ? `Gatekeeper: RSI ${rsi?.toFixed(1) ?? 'unavailable'} not in extreme zone (<25 oversold / >75 overbought).`
+      : !boundaryTouch
+        ? 'Gatekeeper: price has not touched or pierced the outer Bollinger Band.'
+        : !strongRejection
+          ? 'Gatekeeper: candle lacks a prominent body-to-wick rejection geometry.'
+          : choppy
+            ? 'Gatekeeper: market is choppy (mid-band price, overlapping candles, or band squeeze).'
+            : `Gatekeeper: confluence ${confidenceScore}% below required ${requiredConfluence}% (MTG level ${mtg.level}).`;
 
   const expiry = decideExpiry({
     signal,
@@ -551,7 +592,7 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
   if (candleMetrics) parts.push(`${candleMetrics.rejection.toLowerCase()} rejection wick ${(Math.max(candleMetrics.upperWickRatio, candleMetrics.lowerWickRatio) * 100).toFixed(0)}%`);
   if (swing) parts.push(`${swing.type.toLowerCase()} @ ${swing.level.toFixed(5)} (strength ${swing.strength})`);
 
-  const reasoning = `Confluence ${confidenceScore}% — ${parts.join('; ') || 'insufficient data'}.${mtg.riskWarning ? ` ${mtg.riskWarning}` : ''}`;
+  const reasoning = `${gateFailureReason ?? `Confluence ${confidenceScore}%` } — ${parts.join('; ') || 'insufficient data'}.${mtg.riskWarning ? ` ${mtg.riskWarning}` : ''}`;
 
   mtg.lastSignal = signal;
 

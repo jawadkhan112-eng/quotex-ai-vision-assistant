@@ -175,9 +175,14 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
           <div className="text-3xl font-black tracking-[.12em]">{badgeLabel}</div>
           <div className="mt-2 font-mono text-sm">{result ? `${result.confidenceScore}% confluence` : 'Awaiting analysis'}</div>
           <div className="mt-1 font-mono text-xs">{result ? `Recommended expiry: ${result.expiry.label} (${result.expiry.candles > 0 ? `${result.expiry.candles} candle${result.expiry.candles > 1 ? 's' : ''}` : 'stand aside'})` : ''}</div>
+          {result && <div className="mt-1 font-mono text-[11px] opacity-75">Sureshot gate: {result.confidenceScore >= 80 ? '✓' : '✗'} 80%+ required (MTG req: {result.mtg.requiredConfluence}%)</div>}
         </div>
-        {result?.mtg && result.mtg.level !== 'BASE' && (
-          <div className="mt-3 border border-amber-400/40 bg-amber-400/10 p-3 text-xs text-amber-200"><span className="flex items-center gap-2 font-bold"><AlertTriangle className="h-4 w-4" />{result.mtg.level.replace('_', ' ')} ACTIVE</span><p className="mt-1">{result.mtg.riskWarning}</p></div>
+        {result && (
+          <div className={`mt-3 border p-3 text-xs ${result.mtg.level !== 'BASE' ? 'border-amber-400/40 bg-amber-400/10 text-amber-200' : 'border-slate-700 bg-slate-950 text-slate-400'}`}>
+            <span className="flex items-center gap-2 font-bold"><AlertTriangle className="h-4 w-4" />MTG STATUS: {result.mtg.level.replace('_', ' ')}</span>
+            <p className="mt-1 font-mono">Recovery target: {result.mtg.recoveryTarget} units · Stake multiplier: {result.mtg.stakeMultiplier}x · Required confluence: {result.mtg.requiredConfluence}%</p>
+            {result.mtg.riskWarning && <p className="mt-1">{result.mtg.riskWarning}</p>}
+          </div>
         )}
         {result && (
           <div className="mt-5 grid grid-cols-2 gap-px overflow-hidden border border-slate-800 bg-slate-800">

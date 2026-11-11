@@ -34,7 +34,7 @@ export interface AlgoAnalysisResult {
   actionBadge: string;
   expiry: { recommendation: 'NEXT_1M' | 'EXPIRY_2M' | 'EXPIRY_5M_PLUS' | 'WAIT'; label: string; candles: number; rationale: string };
   confluence: { rsiExtreme: boolean; bollingerBoundaryTouch: boolean; rejectionWickStrong: boolean; momentumAligned: boolean; trendAligned: boolean; choppyMarket: boolean; score: number };
-  mtg: { level: 'BASE' | 'MTG_LEVEL_1' | 'MTG_LEVEL_2'; consecutiveFailures: number; lastSignal?: 'CALL' | 'PUT' | 'WAIT'; lastOutcome?: 'WIN' | 'LOSS'; riskWarning?: string };
+  mtg: { level: 'BASE' | 'MTG_LEVEL_1' | 'MTG_LEVEL_2'; consecutiveFailures: number; lastSignal?: 'CALL' | 'PUT' | 'WAIT'; lastOutcome?: 'WIN' | 'LOSS'; riskWarning?: string; recoveryTarget: number; requiredConfluence: number; stakeMultiplier: number };
   forNextCandle: boolean;
   chartDetection: { isChart: boolean; score: number; reason: string };
 }
