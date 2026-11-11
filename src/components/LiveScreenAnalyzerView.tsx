@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, Camera, Square, Zap, AlertTriangle } from 'lucide-react';
+import { Activity, Camera, Square, Zap, AlertTriangle, Timer } from 'lucide-react';
 import type { AlgoAnalysisResult } from '../types';
 
 interface Props { selectedSymbol: string; selectedTimeframe: string; }
@@ -16,6 +16,9 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
   const [error, setError] = useState('');
   const [countdown, setCountdown] = useState(0);
   const [flashNewCandle, setFlashNewCandle] = useState(false);
+  const [preCloseActive, setPreCloseActive] = useState(false);
+  const [lockedSignal, setLockedSignal] = useState<AlgoAnalysisResult | null>(null);
+  const resultRef = useRef<AlgoAnalysisResult | null>(null);
 
   useEffect(() => {
     if (active && video.current && stream.current) video.current.srcObject = stream.current;
@@ -35,6 +38,7 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
       const data = await response.json();
       if (!data.success) throw new Error(data.error);
       setResult(data.result);
+      resultRef.current = data.result;
     } catch (caught) { setError(caught instanceof Error ? caught.message : 'Local analysis failed.'); }
     finally { setWorking(false); }
   }, [active, selectedSymbol, selectedTimeframe]);
@@ -54,32 +58,62 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     return () => window.clearInterval(timer);
   }, [auto, active]);
 
-  // Candle-close synchronised analysis: heavy math runs in the final 10s, signal fires at new-candle open.
+  // Candle-close synchronised analysis: exactly 30 seconds before closure the
+  // high-priority analysis fires and the resulting signal is locked for instant
+  // execution at the open of the next candle.
   const runRef = useRef(run);
   runRef.current = run;
+  const audioRef = useRef<AudioContext | null>(null);
+  const beep = useCallback((frequency: number) => {
+    try {
+      audioRef.current ??= new AudioContext();
+      const oscillator = audioRef.current.createOscillator();
+      const gain = audioRef.current.createGain();
+      oscillator.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.08, audioRef.current.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioRef.current.currentTime + 0.35);
+      oscillator.connect(gain).connect(audioRef.current.destination);
+      oscillator.start();
+      oscillator.stop(audioRef.current.currentTime + 0.35);
+    } catch { /* audio is optional */ }
+  }, []);
   useEffect(() => {
     if (!auto) return;
     let firedForMinute: number | null = null;
+    let lockedForMinute: number | null = null;
     let openedForMinute: number | null = null;
     const tick = () => {
       const now = new Date();
       const second = now.getSeconds();
       const toClosure = 60 - second;
       setCountdown(toClosure);
-      if (second >= 50 && second < 60 && firedForMinute !== now.getMinutes()) {
+      const inWindow = second >= 30 && second < 60;
+      setPreCloseActive(inWindow);
+      if (second >= 30 && firedForMinute !== now.getMinutes()) {
         firedForMinute = now.getMinutes();
-        void runRef.current(); // pre-close analysis in the final 10 seconds
+        beep(inWindow ? 520 : 660); // audible cue that the pre-close window opened
+        void runRef.current(); // 30-second pre-close frame capture + high-priority analysis
+      }
+      if (second < 30 && lockedForMinute !== now.getMinutes() && resultRef.current) {
+        lockedForMinute = now.getMinutes();
+        const finalResult = resultRef.current;
+        setLockedSignal(finalResult);
+        // Signal locked at candle close — flash badge + audio cue for instant execution.
+        if (finalResult.signal !== 'WAIT' && finalResult.chartDetection.isChart) {
+          beep(finalResult.signal === 'CALL' ? 880 : 440);
+          window.setTimeout(() => beep(finalResult.signal === 'CALL' ? 880 : 440), 450);
+        }
       }
       if (second >= 0 && second < 2 && openedForMinute !== now.getMinutes()) {
         openedForMinute = now.getMinutes();
         setFlashNewCandle(true);
-        window.setTimeout(() => setFlashNewCandle(false), 3000); // flash alert at new candle open
+        window.setTimeout(() => setFlashNewCandle(false), 6000); // flash alert at new candle open
       }
     };
     tick();
     const interval = window.setInterval(tick, 1000);
     return () => window.clearInterval(interval);
-  }, [auto]);
+  }, [auto, beep]);
 
   const start = async () => {
     try {
@@ -111,6 +145,20 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
         <button onClick={() => void run()} disabled={working} className="flex items-center gap-2 bg-cyan-400 px-4 py-2 text-sm font-bold text-slate-950 disabled:opacity-50"><Zap className="h-4 w-4" />{working ? 'Calculating…' : 'Analyse now'}</button>
       </div>
     </div>
+    {auto && (
+      <div className="mb-4 border border-slate-800 bg-slate-900/70 p-4">
+        <div className="flex items-center justify-between text-xs font-mono">
+          <span className={`flex items-center gap-2 ${preCloseActive ? 'font-bold text-amber-300' : 'text-slate-400'}`}><Timer className="h-4 w-4" />{preCloseActive ? `Analyzing in ${countdown}s... Pre-close window active` : `Pre-close analysis triggers at 30s — currently ${countdown}s to close`}</span>
+          <span className={preCloseActive ? 'text-amber-300' : 'text-slate-500'}>{preCloseActive ? 'HIGH-PRIORITY SCAN' : 'STANDBY'}</span>
+        </div>
+        <div className="mt-2 h-2 w-full overflow-hidden rounded bg-slate-800">
+          <div className={`h-full transition-all duration-1000 ease-linear ${preCloseActive ? 'bg-amber-400' : 'bg-cyan-400'}`} style={{ width: `${(countdown / 60) * 100}%` }} />
+        </div>
+      </div>
+    )}
+    {lockedSignal && lockedSignal.signal !== 'WAIT' && lockedSignal.chartDetection.isChart && !flashNewCandle && (
+      <div className={`mb-4 border-2 p-4 ${badgeTone}`}><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-widest opacity-75">Signal locked at candle close — execute at next candle open</p><p className="mt-1 text-xl font-black tracking-wider">{lockedSignal.actionBadge}</p></div><div className="text-right"><p className="text-2xl font-black">{lockedSignal.confidenceScore}%</p><p className="font-mono text-xs opacity-75">Expiry: {lockedSignal.expiry.label}</p></div></div><p className="mt-2 font-mono text-xs opacity-75">Execution target: For Next Candle Opening (Expiry: {lockedSignal.expiry.candles}M based on wick/structure)</p></div>
+    )}
     {result && !result.chartDetection.isChart && (
       <div className="mb-4 flex items-start gap-3 border-2 border-amber-400 bg-amber-400/10 p-4 text-amber-200"><AlertTriangle className="mt-.5 h-6 w-6 shrink-0" /><div><p className="font-bold">No valid trading chart detected on shared screen</p><p className="mt-1 text-sm">Switch your screen share to the live Quotex chart window/tab, then let auto-monitoring re-validate the frame. No trading signals are generated from non-chart content.</p>{active && <p className="mt-1 font-mono text-xs">Validator score: {result.chartDetection.score}/100</p>}</div></div>
     )}
