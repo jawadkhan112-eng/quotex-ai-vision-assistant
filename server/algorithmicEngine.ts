@@ -641,13 +641,22 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
   const confidenceBase = Math.min(98, Math.round(agrees));
   const confidenceScore = mtg.level === 'BASE' ? confidenceBase : Math.round(confidenceBase * 0.9);
 
+  // Clean-formation check: messy candles (doji, spinning top, tiny ambiguous
+  // bodies with conflicting wicks) are disqualified even if other gates pass.
+  const patternNameEarly = lastCandle && candleMetrics ? classifyCandlePattern(lastCandle, candleMetrics) : 'NONE';
+  const cleanFormation =
+    candleMetrics !== undefined &&
+    (candleMetrics.bodyRatio >= 0.3 || strongRejection) &&
+    patternNameEarly !== 'DOJI' &&
+    patternNameEarly !== 'SPINNING_TOP';
+
   // Strict 80%+ high-confidence gatekeeper. A CALL/PUT only leaves the engine when
-  // ALL of the following hold: RSI extreme (<25 / >75), Bollinger outer-band
-  // touch/pierce, prominent rejection wick, non-choppy market, and confluence above
-  // the level-specific threshold (80% base / 85% MTG1 / 90% MTG2).
+  // ALL of the following hold: clean candle formation, RSI extreme (<25 / >75),
+  // Bollinger outer-band touch/pierce, prominent rejection wick, non-choppy market,
+  // and confluence above the level-specific threshold (80% base / 85% MTG1 / 90% MTG2).
   const coreConditionsMet = rsiExtremeStrict && boundaryTouch && strongRejection;
   const requiredConfluence = MTG_REQUIRED_CONFLUENCE[mtg.level];
-  const gatePassed = coreConditionsMet && !choppy && confidenceScore >= requiredConfluence;
+  const gatePassed = coreConditionsMet && !choppy && cleanFormation && confidenceScore >= requiredConfluence;
   const signal: SignalDirection = gatePassed ? dirBias ?? 'WAIT' : 'WAIT';
   const gateFailureReason = gatePassed
     ? undefined
@@ -657,9 +666,11 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
         ? 'Gatekeeper: price has not touched or pierced the outer Bollinger Band.'
         : !strongRejection
           ? 'Gatekeeper: candle lacks a prominent body-to-wick rejection geometry.'
-          : choppy
-            ? 'Gatekeeper: market is choppy (mid-band price, overlapping candles, or band squeeze).'
-            : `Gatekeeper: confluence ${confidenceScore}% below required ${requiredConfluence}% (MTG level ${mtg.level}).`;
+          : !cleanFormation
+            ? 'Gatekeeper: messy/unclean candle formation (doji or spinning-top shape, no decisive body).'
+            : choppy
+              ? 'Gatekeeper: market is choppy (mid-band price, overlapping candles, or band squeeze).'
+              : `Gatekeeper: confluence ${confidenceScore}% below required ${requiredConfluence}% (MTG level ${mtg.level}).`;
 
   const expiry = decideExpiry({
     signal,
