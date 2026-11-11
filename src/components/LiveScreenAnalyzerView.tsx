@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, Camera, Square, Zap, AlertTriangle, Timer, Volume2, VolumeX } from 'lucide-react';
 import type { AlgoAnalysisResult } from '../types';
 import { alertManager } from '../services/alertManager';
+import { detectChartIdentity, disposeOcr } from '../services/chartOcr';
+import { describeIdentityChange, type ChartIdentity } from '../../server/chartIdentity';
 
 interface Props { selectedSymbol: string; selectedTimeframe: string; }
 
@@ -20,6 +22,10 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
   const [lockedSignal, setLockedSignal] = useState<AlgoAnalysisResult | null>(null);
   const [paused, setPaused] = useState(false);
   const [lastCaptureAt, setLastCaptureAt] = useState<number | null>(null);
+  // Auto chart identity detection (pair / market type / timeframe via OCR).
+  const [identity, setIdentity] = useState<ChartIdentity | null>(null);
+  const [identityChanges, setIdentityChanges] = useState<string[]>([]);
+  const [ocrBusy, setOcrBusy] = useState(false);
   const resultRef = useRef<AlgoAnalysisResult | null>(null);
   const startingRef = useRef(false); // duplicate-session guard
 
@@ -54,6 +60,33 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     finally { setWorking(false); }
   }, [active, paused, selectedSymbol, selectedTimeframe]);
 
+  // Chart identity detection: throttled OCR pass on the shared frame. Runs only
+  // when a canvas frame exists; identity change invalidates the locked signal.
+  const identityRunningRef = useRef(false);
+  useEffect(() => {
+    if (!active) return;
+    const scan = async () => {
+      if (identityRunningRef.current || !canvas.current || canvas.current.width === 0) return;
+      identityRunningRef.current = true;
+      setOcrBusy(true);
+      try {
+        const detection = await detectChartIdentity(canvas.current);
+        setIdentity((previous) => {
+          const changes = describeIdentityChange(previous, detection.identity);
+          if (changes.length > 0 && previous) {
+            setIdentityChanges(changes);
+            setLockedSignal(null); // old chart's signal must not contaminate the new chart
+          }
+          return detection.identity;
+        });
+      } catch { /* OCR failures degrade to UNKNOWN identity honestly */ }
+      finally { identityRunningRef.current = false; setOcrBusy(false); }
+    };
+    scan();
+    const timer = window.setInterval(scan, 10000); // identity refresh every 10s
+    return () => { window.clearInterval(timer); void disposeOcr(); };
+  }, [active]);
+
   // Continuous background frame ingestion: lightweight polling captures new frames constantly.
   useEffect(() => {
     if (!auto || !active || paused) return;
@@ -67,7 +100,7 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     ingest();
     const timer = window.setInterval(ingest, 500);
     return () => window.clearInterval(timer);
-  }, [auto, active]);
+  }, [auto, active, paused]);
 
   // Candle-close synchronised analysis: exactly 30 seconds before closure the
   // high-priority analysis fires and the resulting signal is locked for instant
@@ -135,6 +168,7 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     stream.current = null;
     startingRef.current = false;
     setActive(false); setAuto(false); setPaused(false); setLastCaptureAt(null);
+    setIdentity(null); setIdentityChanges([]);
   }, []);
 
   const start = useCallback(async () => {
@@ -167,6 +201,19 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     : '🟡 WAIT';
 
   return <section className="mx-auto max-w-7xl p-5 lg:p-8">
+    <div className="mb-4 border border-slate-800 bg-slate-900/70 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs font-semibold uppercase tracking-widest text-slate-400">Auto chart detection</p>
+        <span className="font-mono text-xs text-slate-500">{ocrBusy ? 'Reading chart header…' : active ? 'Scanning every 10s' : 'Idle — share your chart screen'}</span>
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
+        <div><p className="text-[10px] uppercase tracking-wider text-slate-500">Pair</p><p className="font-mono font-bold">{identity?.pair.pair ?? 'UNKNOWN'} <span className="text-[10px] text-slate-500">{identity ? `${identity.pair.confidence}%` : ''}</span></p></div>
+        <div><p className="text-[10px] uppercase tracking-wider text-slate-500">Market</p><p className="font-mono font-bold">{identity?.marketType.marketType ?? 'UNKNOWN'}</p></div>
+        <div><p className="text-[10px] uppercase tracking-wider text-slate-500">Timeframe</p><p className="font-mono font-bold">{identity?.timeframe.timeframe ?? 'UNKNOWN'} <span className="text-[10px] text-slate-500">{identity ? `${identity.timeframe.confidence}%` : ''}</span></p></div>
+        <div><p className="text-[10px] uppercase tracking-wider text-slate-500">Status</p><p className={`font-mono font-bold ${(identity?.pair.confidence ?? 0) >= 60 ? 'text-emerald-300' : 'text-amber-300'}`}>{!identity ? 'UNKNOWN' : (identity.pair.confidence >= 60 && identity.timeframe.confidence >= 60) ? 'VERIFIED' : 'ESTIMATED'}</p></div>
+      </div>
+      {identityChanges.length > 0 && <p className="mt-2 text-xs text-amber-300">⚠ {identityChanges.join(' · ')} — locked signal invalidated</p>}
+    </div>
     <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
       <div><p className="font-mono text-[11px] uppercase tracking-[.24em] text-cyan-400">Local / deterministic / zero API keys</p><h2 className="mt-2 text-2xl font-bold tracking-tight">Algorithmic Trading &amp; Technical Analysis Terminal</h2></div>
       <div className="flex items-center gap-3">

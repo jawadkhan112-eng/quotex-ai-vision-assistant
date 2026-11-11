@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Upload, Camera, Eye, Trash2, Image as ImageIcon } from 'lucide-react';
 import type { AlgoAnalysisResult } from '../types';
+import { detectChartIdentity } from '../services/chartOcr';
+import { describeIdentityChange, type ChartIdentity } from '../../server/chartIdentity';
 
 interface ScreenshotRow {
   id: number;
@@ -29,6 +31,8 @@ export const ScreenshotLabView: React.FC = () => {
   const [error, setError] = useState('');
   const [working, setWorking] = useState(false);
   const [history, setHistory] = useState<ScreenshotRow[]>([]);
+  // Each screenshot keeps its OWN identity — never overwritten by live-screen data.
+  const [shotIdentity, setShotIdentity] = useState<ChartIdentity | null>(null);
 
   const loadHistory = useCallback(async () => {
     try {
@@ -40,7 +44,7 @@ export const ScreenshotLabView: React.FC = () => {
   useEffect(() => { void loadHistory(); }, [loadHistory]);
 
   const analyzeImage = useCallback(async (image: HTMLImageElement) => {
-    setWorking(true); setError(''); setResult(null);
+    setWorking(true); setError(''); setResult(null); setShotIdentity(null);
     try {
       const canvas = canvasRef.current!;
       const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
@@ -48,6 +52,11 @@ export const ScreenshotLabView: React.FC = () => {
       canvas.width = W; canvas.height = H;
       ctx.drawImage(image, 0, 0, W, H);
       const pixels = Array.from(ctx.getImageData(0, 0, W, H).data);
+      // Independent identity detection on THIS exact screenshot.
+      try {
+        const detection = await detectChartIdentity(canvas);
+        setShotIdentity(detection.identity);
+      } catch { setShotIdentity(null); }
       const res = await fetch('/api/analyze-algorithmic', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -72,7 +81,7 @@ export const ScreenshotLabView: React.FC = () => {
     const reader = new FileReader();
     reader.onload = () => {
       const url = typeof reader.result === 'string' ? reader.result : null;
-      setPreview(url);
+      setPreview(url); setShotIdentity(null);
       if (!url) return;
       const img = new Image();
       img.onload = () => void analyzeImage(img);
@@ -125,6 +134,13 @@ export const ScreenshotLabView: React.FC = () => {
             <div className={`border p-4 text-center ${result.signal === 'CALL' ? 'border-emerald-400 bg-emerald-400/10 text-emerald-300' : result.signal === 'PUT' ? 'border-rose-400 bg-rose-400/10 text-rose-300' : 'border-amber-400 bg-amber-400/10 text-amber-300'}`}>
               <p className="text-2xl font-black">{result.actionBadge}</p>
               <p className="mt-1 font-mono text-xs">{result.confidenceScore}% confluence · {result.expiry.label}</p>
+            </div>
+            <div className="border border-slate-800 bg-slate-950 p-3 font-mono text-xs">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500">Detected identity (this screenshot only)</p>
+              <p className="mt-1">PAIR: <span className="font-bold text-slate-100">{shotIdentity?.pair.pair ?? 'UNKNOWN'}</span> ({shotIdentity?.pair.confidence ?? 0}%)</p>
+              <p>MARKET: <span className="font-bold text-slate-100">{shotIdentity?.marketType.marketType ?? 'UNKNOWN'}</span></p>
+              <p>TIMEFRAME: <span className="font-bold text-slate-100">{shotIdentity?.timeframe.timeframe ?? 'UNKNOWN'}</span> ({shotIdentity?.timeframe.confidence ?? 0}%)</p>
+              <p className="text-slate-500">Status: {(shotIdentity?.pair.confidence ?? 0) >= 60 ? 'VERIFIED' : shotIdentity ? 'ESTIMATED' : 'UNKNOWN'} · detected from this image, independent of live screen</p>
             </div>
             <p className="font-mono text-xs text-slate-400">Chart: {result.chartDetection.isChart ? `valid (score ${result.chartDetection.score}/100)` : 'NOT VALID'}</p>
             <p className="text-sm text-slate-300">{result.reasoning}</p>
