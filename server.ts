@@ -32,6 +32,81 @@ app.post('/api/signal-outcome', (req, res) => {
 });
 app.post('/api/mtg-reset', (_req, res) => { resetMtgState(); res.json({ success: true, local: true }); });
 
+// ---- MTG (Martingale) persistent recovery chains ----
+// A chain records the original signal (level 0) and up to two visually verified
+// recovery steps. Outcomes must be explicitly reported; nothing is auto-won.
+app.post('/api/mtg/start', (req, res) => {
+  const { symbol = 'Local chart', timeframe = '1M', signal, confidence } = req.body || {};
+  if (signal !== 'CALL' && signal !== 'PUT' && signal !== 'WAIT') return res.status(400).json({ success: false, error: 'signal must be CALL, PUT or WAIT.' });
+  try {
+    const now = new Date().toISOString();
+    const info = db.prepare("INSERT INTO mtg_chains (created_at, updated_at, symbol, timeframe, level0_signal, level0_confidence, level0_outcome, status) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', 'PENDING')").run(now, now, String(symbol), String(timeframe), signal, Math.max(0, Math.min(100, Number(confidence) || 0)));
+    const chain = db.prepare('SELECT * FROM mtg_chains WHERE id = ?').get(info.lastInsertRowid);
+    res.json({ success: true, chain, local: true });
+  } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+app.post('/api/mtg/:id/step', (req, res) => {
+  const { signal, confidence, outcome } = req.body || {};
+  try {
+    const chain: any = db.prepare('SELECT * FROM mtg_chains WHERE id = ?').get(req.params.id);
+    if (!chain) return res.status(404).json({ success: false, error: 'MTG chain not found.' });
+    const now = new Date().toISOString();
+    // Find the first unresolved level for this chain and record the step + outcome.
+    if (chain.level0_outcome === 'PENDING' || chain.level0_outcome === null) {
+      db.prepare("UPDATE mtg_chains SET level0_outcome = ?, level1_signal = ?, level1_confidence = ?, level1_outcome = 'PENDING', updated_at = ? WHERE id = ?").run(outcome === 'WIN' || outcome === 'LOSS' ? outcome : 'PENDING', signal ?? null, Number(confidence) || null, now, chain.id);
+    } else if (chain.level1_outcome === 'PENDING' || chain.level1_outcome === null) {
+      db.prepare("UPDATE mtg_chains SET level1_outcome = ?, level2_signal = ?, level2_confidence = ?, level2_outcome = 'PENDING', updated_at = ? WHERE id = ?").run(outcome === 'WIN' || outcome === 'LOSS' ? outcome : 'PENDING', signal ?? null, Number(confidence) || null, now, chain.id);
+    } else if (chain.level2_outcome === 'PENDING' || chain.level2_outcome === null) {
+      db.prepare("UPDATE mtg_chains SET level2_outcome = ?, status = CASE WHEN ? = 'WIN' THEN 'COMPLETED' ELSE 'FAILED' END, updated_at = ? WHERE id = ?").run(outcome === 'WIN' || outcome === 'LOSS' ? outcome : 'PENDING', outcome, now, chain.id);
+    } else {
+      return res.status(400).json({ success: false, error: 'MTG chain already resolved.' });
+    }
+    const updated = db.prepare('SELECT * FROM mtg_chains WHERE id = ?').get(chain.id);
+    res.json({ success: true, chain: updated, local: true });
+  } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+app.get('/api/mtg', (req, res) => {
+  try {
+    const chains = db.prepare('SELECT * FROM mtg_chains ORDER BY id DESC LIMIT ?').all(Math.min(Number(req.query.limit) || 50, 200));
+    const stats = db.prepare("SELECT status, COUNT(*) AS count FROM mtg_chains GROUP BY status").all();
+    res.json({ success: true, chains, stats, local: true });
+  } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+app.delete('/api/mtg/:id', (req, res) => {
+  try { db.prepare('DELETE FROM mtg_chains WHERE id = ?').run(req.params.id); res.json({ success: true }); } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+// ---- Screenshot analysis records ----
+app.post('/api/screenshots', (req, res) => {
+  const { source = 'UPLOAD', width, height, result } = req.body || {};
+  if (!result) return res.status(400).json({ success: false, error: 'analysis result is required.' });
+  try {
+    const info = db.prepare('INSERT INTO screenshot_analyses (created_at, source, width, height, chart_valid, chart_score, signal, confidence, candles_detected, candle_quality, reasoning, result_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      new Date().toISOString(), String(source), Number(width) || null, Number(height) || null,
+      result.chartDetection?.isChart ? 1 : 0, result.chartDetection?.score ?? null,
+      result.signal ?? 'WAIT', result.confidenceScore ?? 0,
+      result.reconstructedCandleCount ?? null, result.reconstructionQuality ?? null,
+      result.reasoning ?? '', JSON.stringify(result)
+    );
+    const record = db.prepare('SELECT * FROM screenshot_analyses WHERE id = ?').get(info.lastInsertRowid);
+    res.json({ success: true, record, local: true });
+  } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+app.get('/api/screenshots', (req, res) => {
+  try {
+    const rows = db.prepare('SELECT id, created_at, source, width, height, chart_valid, chart_score, signal, confidence, candles_detected, candle_quality, reasoning FROM screenshot_analyses ORDER BY id DESC LIMIT ?').all(Math.min(Number(req.query.limit) || 50, 200));
+    res.json({ success: true, screenshots: rows, local: true });
+  } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+app.delete('/api/screenshots/:id', (req, res) => {
+  try { db.prepare('DELETE FROM screenshot_analyses WHERE id = ?').run(req.params.id); res.json({ success: true }); } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
+});
+
 app.get('/api/history', (req, res) => { try { const limit = Math.min(Number(req.query.limit) || 50, 200); res.json({ success: true, history: db.prepare('SELECT * FROM analysis_history ORDER BY id DESC LIMIT ?').all(limit) }); } catch (error: any) { res.status(500).json({ success: false, error: error.message }); } });
 app.delete('/api/history/:id', (req, res) => { try { db.prepare('DELETE FROM analysis_history WHERE id = ?').run(req.params.id); res.json({ success: true }); } catch (error: any) { res.status(500).json({ success: false, error: error.message }); } });
 app.delete('/api/history', (_req, res) => { try { db.prepare('DELETE FROM analysis_history').run(); res.json({ success: true }); } catch (error: any) { res.status(500).json({ success: false, error: error.message }); } });

@@ -3,7 +3,6 @@ import { Activity, Camera, Square, Zap, AlertTriangle, Timer } from 'lucide-reac
 import type { AlgoAnalysisResult } from '../types';
 
 interface Props { selectedSymbol: string; selectedTimeframe: string; }
-const samplePrices = [1.071, 1.069, 1.068, 1.067, 1.066, 1.067, 1.065, 1.064, 1.063, 1.062, 1.061, 1.060, 1.059, 1.058, 1.057, 1.058, 1.056, 1.055, 1.054, 1.056, 1.058];
 
 export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, selectedTimeframe }) => {
   const video = useRef<HTMLVideoElement>(null);
@@ -18,7 +17,10 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
   const [flashNewCandle, setFlashNewCandle] = useState(false);
   const [preCloseActive, setPreCloseActive] = useState(false);
   const [lockedSignal, setLockedSignal] = useState<AlgoAnalysisResult | null>(null);
+  const [paused, setPaused] = useState(false);
+  const [lastCaptureAt, setLastCaptureAt] = useState<number | null>(null);
   const resultRef = useRef<AlgoAnalysisResult | null>(null);
+  const startingRef = useRef(false); // duplicate-session guard
 
   useEffect(() => {
     if (active && video.current && stream.current) video.current.srcObject = stream.current;
@@ -28,24 +30,32 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     setWorking(true); setError('');
     try {
       let frame: { width: number; height: number; pixels: number[] } | undefined;
-      if (active && video.current && canvas.current && video.current.videoWidth > 0) {
+      if (active && !paused && video.current && canvas.current && video.current.videoWidth > 0) {
         const context = canvas.current.getContext('2d', { willReadFrequently: true });
         canvas.current.width = 320; canvas.current.height = 180;
         context?.drawImage(video.current, 0, 0, 320, 180);
         frame = { width: 320, height: 180, pixels: Array.from(context?.getImageData(0, 0, 320, 180).data ?? []) };
+        setLastCaptureAt(Date.now());
       }
-      const response = await fetch('/api/analyze-algorithmic', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ symbol: selectedSymbol, timeframe: selectedTimeframe, prices: active ? [] : samplePrices, frame }) });
+      // Real screen data only: without an active shared frame or user-supplied price
+      // series, analysis is refused rather than falling back to synthetic prices.
+      if (!frame) {
+        setError('No screen shared. Share your Quotex chart screen so analysis uses real chart pixels — synthetic price fallbacks are disabled.');
+        setWorking(false);
+        return;
+      }
+      const response = await fetch('/api/analyze-algorithmic', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ symbol: selectedSymbol, timeframe: selectedTimeframe, frame }) });
       const data = await response.json();
       if (!data.success) throw new Error(data.error);
       setResult(data.result);
       resultRef.current = data.result;
     } catch (caught) { setError(caught instanceof Error ? caught.message : 'Local analysis failed.'); }
     finally { setWorking(false); }
-  }, [active, selectedSymbol, selectedTimeframe]);
+  }, [active, paused, selectedSymbol, selectedTimeframe]);
 
   // Continuous background frame ingestion: lightweight polling captures new frames constantly.
   useEffect(() => {
-    if (!auto || !active) return;
+    if (!auto || !active || paused) return;
     const ingest = () => {
       if (video.current && canvas.current && video.current.videoWidth > 0) {
         const context = canvas.current.getContext('2d', { willReadFrequently: true });
@@ -115,14 +125,29 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     return () => window.clearInterval(interval);
   }, [auto, beep]);
 
-  const start = async () => {
+  const stop = useCallback(() => {
+    stream.current?.getTracks().forEach((track) => track.stop());
+    stream.current = null;
+    startingRef.current = false;
+    setActive(false); setAuto(false); setPaused(false); setLastCaptureAt(null);
+  }, []);
+
+  const start = useCallback(async () => {
+    if (stream.current || startingRef.current) return; // single active session guard
+    startingRef.current = true;
     try {
       stream.current = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
       stream.current.getVideoTracks()[0]?.addEventListener('ended', stop);
       setActive(true);
-    } catch { setError('Screen sharing was not granted. You can still run deterministic price analysis.'); }
-  };
-  const stop = () => { stream.current?.getTracks().forEach((track) => track.stop()); stream.current = null; setActive(false); setAuto(false); };
+      setError('');
+    } catch {
+      startingRef.current = false;
+      setError('Screen sharing was not granted. Share your Quotex chart screen so analysis uses real chart pixels.');
+    }
+  }, [stop]);
+
+  // Safe cleanup on unmount — never leave orphan tracks running.
+  useEffect(() => () => stop(), [stop]);
 
   const badgeTone =
     result?.signal === 'CALL'
@@ -141,6 +166,9 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
       <div><p className="font-mono text-[11px] uppercase tracking-[.24em] text-cyan-400">Local / deterministic / zero API keys</p><h2 className="mt-2 text-2xl font-bold tracking-tight">Algorithmic Trading &amp; Technical Analysis Terminal</h2></div>
       <div className="flex items-center gap-3">
         {auto && <span className="font-mono text-xs text-cyan-300">Next candle close: {countdown}s</span>}
+        {active && auto && (
+          <button onClick={() => setPaused((value) => !value)} className={`border px-3 py-2 text-sm font-semibold ${paused ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200' : 'border-slate-600 bg-slate-800 text-slate-300'}`}>{paused ? '▶ Resume monitoring' : '⏸ Pause monitoring'}</button>
+        )}
         <button onClick={() => setAuto((value) => !value)} className={`border px-4 py-2 text-sm font-semibold ${auto ? 'border-rose-400/40 bg-rose-400/10 text-rose-200' : 'border-cyan-400/40 bg-cyan-400/10 text-cyan-200'}`}>{auto ? 'Stop auto-monitoring' : 'Start auto-monitoring'}</button>
         <button onClick={() => void run()} disabled={working} className="flex items-center gap-2 bg-cyan-400 px-4 py-2 text-sm font-bold text-slate-950 disabled:opacity-50"><Zap className="h-4 w-4" />{working ? 'Calculating…' : 'Analyse now'}</button>
       </div>
@@ -148,8 +176,8 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     {auto && (
       <div className="mb-4 border border-slate-800 bg-slate-900/70 p-4">
         <div className="flex items-center justify-between text-xs font-mono">
-          <span className={`flex items-center gap-2 ${preCloseActive ? 'font-bold text-amber-300' : 'text-slate-400'}`}><Timer className="h-4 w-4" />{preCloseActive ? `Analyzing in ${countdown}s... Pre-close window active` : `Pre-close analysis triggers at 30s — currently ${countdown}s to close`}</span>
-          <span className={preCloseActive ? 'text-amber-300' : 'text-slate-500'}>{preCloseActive ? 'HIGH-PRIORITY SCAN' : 'STANDBY'}</span>
+          <span className={`flex items-center gap-2 ${preCloseActive ? 'font-bold text-amber-300' : 'text-slate-400'}`}><Timer className="h-4 w-4" />{paused ? 'Monitoring paused — analysis suspended' : preCloseActive ? `Analyzing in ${countdown}s... Pre-close window active` : `Pre-close analysis triggers at 30s — currently ${countdown}s to close`}</span>
+          <span className={preCloseActive && !paused ? 'text-amber-300' : 'text-slate-500'}>{paused ? 'PAUSED' : preCloseActive ? 'HIGH-PRIORITY SCAN' : 'STANDBY'}</span>
         </div>
         <div className="mt-2 h-2 w-full overflow-hidden rounded bg-slate-800">
           <div className={`h-full transition-all duration-1000 ease-linear ${preCloseActive ? 'bg-amber-400' : 'bg-cyan-400'}`} style={{ width: `${(countdown / 60) * 100}%` }} />
@@ -168,7 +196,7 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     <div className="grid gap-5 lg:grid-cols-[1.25fr_.75fr]">
       <div className="border border-slate-800 bg-slate-900/70 p-5"><div className="flex items-center justify-between border-b border-slate-800 pb-3"><span className="text-sm font-semibold">Chart frame input</span><span className="font-mono text-xs text-slate-400">{selectedSymbol} · {selectedTimeframe}{auto ? ' · continuous scan active' : ''}</span></div>
         <div className="relative mt-4 grid aspect-video place-items-center overflow-hidden border border-slate-800 bg-slate-950"><video ref={video} autoPlay muted className={active ? 'h-full w-full object-contain' : 'hidden'} />{!active && <div className="text-center text-slate-500"><Camera className="mx-auto mb-2 h-8 w-8" /><p className="text-sm">Optional local screen frame</p><p className="mt-1 text-xs">Pixels never leave this terminal.</p></div>}</div>
-        <div className="mt-4 flex flex-wrap gap-3"><button onClick={active ? stop : start} className="flex items-center gap-2 border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium">{active ? <Square className="h-4 w-4" /> : <Camera className="h-4 w-4" />}{active ? 'Stop screen share' : 'Share chart screen'}</button></div>
+        <div className="mt-4 flex flex-wrap gap-3"><button onClick={active ? stop : start} className="flex items-center gap-2 border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium">{active ? <Square className="h-4 w-4" /> : <Camera className="h-4 w-4" />}{active ? 'Stop screen share' : 'Share chart screen'}</button>{lastCaptureAt && <span className="self-center font-mono text-xs text-emerald-400">Last frame captured {Math.round((Date.now() - lastCaptureAt) / 1000)}s ago</span>}</div>
       </div>
       <div className="border border-slate-800 bg-slate-900/70 p-5"><p className="text-xs font-semibold uppercase tracking-widest text-slate-400">Signal output · for next candle expiry</p>
         <div className={`mt-4 border p-5 text-center ${badgeTone}`}>

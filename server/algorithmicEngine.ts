@@ -1,4 +1,5 @@
 // Algorithmic technical-analysis engine. It is deterministic and makes no network calls.
+import { reconstructCandles, type ReconstructedCandle } from './candleReconstruction.js';
 
 export interface Candle {
   open: number;
@@ -185,6 +186,20 @@ export interface AlgoAnalysisResult {
 /* Internal indicator helpers                                          */
 /* ------------------------------------------------------------------ */
 
+export function calculateSMA(data: number[], period: number): number | undefined {
+  if (data.length < period || period <= 0) return undefined;
+  const slice = data.slice(-period);
+  return slice.reduce((acc, v) => acc + v, 0) / period;
+}
+
+export function calculateEMA(data: number[], period: number): number | undefined {
+  if (data.length < period || period <= 0) return undefined;
+  const k = 2 / (period + 1);
+  let ema = data.slice(0, period).reduce((a, v) => a + v, 0) / period;
+  for (let i = period; i < data.length; i++) ema = data[i] * k + ema * (1 - k);
+  return ema;
+}
+
 export function calculateRSI(closes: number[], period = 14): number | undefined {
   if (closes.length <= period) return undefined;
   let gains = 0;
@@ -279,9 +294,11 @@ export interface PatternAnalysis {
 export function classifyCandlePattern(candle: Candle, metrics: CandleMetrics): PatternAnalysis['pattern'] {
   const { bodyRatio, upperWickRatio, lowerWickRatio } = metrics;
   if (bodyRatio >= 0.9) return 'MARUBOZU';
-  if (bodyRatio < 0.1) return 'DOJI';
+  // Wicked formations are more specific than a doji: a hammer with a small body
+  // is still a hammer. Only classless near-flat candles fall through to DOJI.
   if (lowerWickRatio >= 0.55 && lowerWickRatio > upperWickRatio * 2) return 'HAMMER';
   if (upperWickRatio >= 0.55 && upperWickRatio > lowerWickRatio * 2) return 'SHOOTING_STAR';
+  if (bodyRatio < 0.1) return 'DOJI';
   if ((lowerWickRatio >= 0.5 || upperWickRatio >= 0.5) && bodyRatio <= 0.3) return 'PINBAR';
   if (bodyRatio >= 0.55) return 'MARUBOZU';
   return 'SPINNING_TOP';
@@ -572,7 +589,48 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
   }
   if (!frame) chartDetection = { isChart: false, score: 0, reason: 'No captured frame available for chart validation.' };
 
-  const series =
+  // Visual candle reconstruction from the captured frame (estimates with quality
+  // scores, never fabricated values). When explicit OHLC candles are not supplied
+  // by the caller, reconstructed estimates supply the historical series.
+  let reconstruction: ReturnType<typeof reconstructCandles> | undefined;
+  let reconstructedCandles: ReconstructedCandle[] = [];
+  if (frame && chartDetection.isChart) {
+    reconstruction = reconstructCandles(frame);
+    reconstructedCandles = reconstruction.candles;
+  }
+
+  // Series source priority: user-supplied prices -> explicit candles -> visual
+  // reconstruction. Insufficient history leaves indicators unavailable, never fabricated.
+  let seriesSource: 'PRICES' | 'OHLC' | 'RECONSTRUCTED' | 'NONE' = 'NONE';
+  if (prices.length >= 2) seriesSource = 'PRICES';
+  else if (candles && candles.length > 0) seriesSource = 'OHLC';
+  else if (reconstructedCandles.length >= 2) seriesSource = 'RECONSTRUCTED';
+  const series: number[] =
+    seriesSource === 'PRICES' ? prices
+      : seriesSource === 'OHLC' ? candles!.map((c) => c.close)
+        : seriesSource === 'RECONSTRUCTED' ? reconstructedCandles.map((c) => c.close)
+          : [];
+  if (series.length < 2) {
+    return {
+      signal: 'WAIT',
+      confidenceScore: 0,
+      evidenceQualityScore: 0,
+      summaryReason: 'WAIT - INSUFFICIENT CANDLE DATA',
+      analysisTimestamp: new Date().toISOString(),
+      detectedAsset,
+      detectedTimeframe: timeframe,
+      candleObservation: reconstruction?.notes.join(' ') || 'Not enough visible candles for a reliable historical series.',
+      reasoning: 'Insufficient candle history for RSI/Bollinger calculations. Share more visible chart history or supply a candle series.',
+      trendFilter: 'NEUTRAL' as const,
+      actionBadge: 'WAIT - INSUFFICIENT DATA',
+      expiry: { recommendation: 'WAIT' as const, label: 'WAIT (Insufficient Data)', candles: 0, rationale: 'Historical candle data unavailable - indicators cannot be calculated honestly.' },
+      confluence: { rsiExtreme: false, bollingerBoundaryTouch: false, rejectionWickStrong: false, momentumAligned: false, trendAligned: false, choppyMarket: true, score: 0 },
+      mtg: buildMtg(),
+      forNextCandle: false,
+      chartDetection,
+      nextCandlePrediction: { prediction: 'NONE' as const, rationale: 'Insufficient reconstructed candle history.' },
+    };
+  }
     prices.length >= 2 ? prices : candles && candles.length > 0 ? candles.map((c) => c.close) : [];
 
   if (series.length < 2 || series.some((v) => !Number.isFinite(v))) {
@@ -629,7 +687,7 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
     if (boundaryTouch && ((dirBias === 'CALL' && bollingerInfo!.status === 'NEAR_LOWER') || (dirBias === 'PUT' && bollingerInfo!.status === 'NEAR_UPPER'))) agrees += 30;
     if (strongRejection && ((dirBias === 'CALL' && candleMetrics!.rejection === 'BULLISH') || (dirBias === 'PUT' && candleMetrics!.rejection === 'BEARISH'))) agrees += 25;
     if ((dirBias === 'CALL' && trendFilter === 'BULLISH') || (dirBias === 'PUT' && trendFilter === 'BEARISH')) agrees += 10;
-    if ((dirBias === 'CALL' && candleMetrics!.momentum === 'BULLISH') || (dirBias === 'PUT' && candleMetrics!.momentum === 'BEARISH')) agrees += 5;
+    if ((dirBias === 'CALL' && candleMetrics?.momentum === 'BULLISH') || (dirBias === 'PUT' && candleMetrics?.momentum === 'BEARISH')) agrees += 5;
   }
 
   const choppy =

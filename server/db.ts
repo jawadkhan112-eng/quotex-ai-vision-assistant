@@ -74,6 +74,41 @@ export function initDb() {
       source TEXT NOT NULL,
       PRIMARY KEY (symbol, timeframe)
     );
+
+    CREATE TABLE IF NOT EXISTS mtg_chains (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      timeframe TEXT NOT NULL,
+      level0_signal TEXT NOT NULL,
+      level0_confidence INTEGER NOT NULL,
+      level0_outcome TEXT,
+      level1_signal TEXT,
+      level1_confidence INTEGER,
+      level1_outcome TEXT,
+      level2_signal TEXT,
+      level2_confidence INTEGER,
+      level2_outcome TEXT,
+      status TEXT NOT NULL,
+      notes TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS screenshot_analyses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT NOT NULL,
+      source TEXT NOT NULL,
+      width INTEGER,
+      height INTEGER,
+      chart_valid INTEGER NOT NULL,
+      chart_score INTEGER,
+      signal TEXT NOT NULL,
+      confidence INTEGER NOT NULL,
+      candles_detected INTEGER,
+      candle_quality TEXT,
+      reasoning TEXT,
+      result_json TEXT NOT NULL
+    );
   `);
 
   // Insert default settings if missing
