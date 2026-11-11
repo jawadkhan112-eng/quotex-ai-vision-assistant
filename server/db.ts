@@ -75,6 +75,32 @@ export function initDb() {
       PRIMARY KEY (symbol, timeframe)
     );
 
+    CREATE TABLE IF NOT EXISTS signals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      signal_id TEXT UNIQUE NOT NULL,
+      created_at TEXT NOT NULL,
+      symbol TEXT,
+      timeframe TEXT NOT NULL,
+      signal TEXT NOT NULL,
+      confidence INTEGER NOT NULL,
+      action_badge TEXT,
+      expiry_label TEXT,
+      timing_status TEXT NOT NULL,
+      entry_window_seconds INTEGER NOT NULL,
+      chart_valid INTEGER NOT NULL,
+      reasoning TEXT,
+      input_source TEXT,
+      outcome TEXT,
+      outcome_verified_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS alert_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT NOT NULL,
+      signal_id TEXT NOT NULL,
+      channel TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS mtg_chains (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       created_at TEXT NOT NULL,

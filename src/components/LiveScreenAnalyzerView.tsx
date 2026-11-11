@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, Camera, Square, Zap, AlertTriangle, Timer } from 'lucide-react';
+import { Activity, Camera, Square, Zap, AlertTriangle, Timer, Volume2, VolumeX } from 'lucide-react';
 import type { AlgoAnalysisResult } from '../types';
+import { alertManager } from '../services/alertManager';
 
 interface Props { selectedSymbol: string; selectedTimeframe: string; }
 
@@ -73,20 +74,9 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
   // execution at the open of the next candle.
   const runRef = useRef(run);
   runRef.current = run;
-  const audioRef = useRef<AudioContext | null>(null);
-  const beep = useCallback((frequency: number) => {
-    try {
-      audioRef.current ??= new AudioContext();
-      const oscillator = audioRef.current.createOscillator();
-      const gain = audioRef.current.createGain();
-      oscillator.frequency.value = frequency;
-      gain.gain.setValueAtTime(0.08, audioRef.current.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, audioRef.current.currentTime + 0.35);
-      oscillator.connect(gain).connect(audioRef.current.destination);
-      oscillator.start();
-      oscillator.stop(audioRef.current.currentTime + 0.35);
-    } catch { /* audio is optional */ }
-  }, []);
+  // Quiet-mode toggle: controls sound + browser notification channels.
+  const [quietMode, setQuietMode] = useState(alertManager.getSettings().quietMode);
+  useEffect(() => { alertManager.updateSettings({ quietMode }); }, [quietMode]);
   useEffect(() => {
     if (!auto) return;
     let firedForMinute: number | null = null;
@@ -101,17 +91,32 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
       setPreCloseActive(inWindow);
       if (second >= 30 && firedForMinute !== now.getMinutes()) {
         firedForMinute = now.getMinutes();
-        beep(inWindow ? 520 : 660); // audible cue that the pre-close window opened
+
         void runRef.current(); // 30-second pre-close frame capture + high-priority analysis
       }
       if (second < 30 && lockedForMinute !== now.getMinutes() && resultRef.current) {
         lockedForMinute = now.getMinutes();
         const finalResult = resultRef.current;
         setLockedSignal(finalResult);
-        // Signal locked at candle close — flash badge + audio cue for instant execution.
+        // Signal locked at candle close — dispatch through the alert manager
+        // (sound + browser notifications + persisted alert log, dedup-protected).
         if (finalResult.signal !== 'WAIT' && finalResult.chartDetection.isChart) {
-          beep(finalResult.signal === 'CALL' ? 880 : 440);
-          window.setTimeout(() => beep(finalResult.signal === 'CALL' ? 880 : 440), 450);
+          void alertManager.dispatch({
+            signalId: finalResult.signalId,
+            signal: finalResult.signal,
+            actionBadge: finalResult.actionBadge,
+            confidenceScore: finalResult.confidenceScore,
+            expiryLabel: finalResult.expiry.label,
+            timingStatus: finalResult.timingStatus,
+            timeframe: finalResult.detectedTimeframe ?? '1M',
+            reasoning: finalResult.reasoning ?? '',
+          }).then((channels) => {
+            if (channels.length > 0) {
+              void fetch('/api/alerts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ signalId: finalResult.signalId, channels }) });
+            }
+          });
+          // Persist the signal record with its unique ID for outcome tracking.
+          void fetch('/api/signals', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ result: finalResult, inputSource: 'LIVE_FRAME' }) });
         }
       }
       if (second >= 0 && second < 2 && openedForMinute !== now.getMinutes()) {
@@ -123,7 +128,7 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     tick();
     const interval = window.setInterval(tick, 1000);
     return () => window.clearInterval(interval);
-  }, [auto, beep]);
+  }, [auto]);
 
   const stop = useCallback(() => {
     stream.current?.getTracks().forEach((track) => track.stop());
@@ -166,6 +171,7 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
       <div><p className="font-mono text-[11px] uppercase tracking-[.24em] text-cyan-400">Local / deterministic / zero API keys</p><h2 className="mt-2 text-2xl font-bold tracking-tight">Algorithmic Trading &amp; Technical Analysis Terminal</h2></div>
       <div className="flex items-center gap-3">
         {auto && <span className="font-mono text-xs text-cyan-300">Next candle close: {countdown}s</span>}
+        <button onClick={() => setQuietMode((q) => !q)} className={`border px-3 py-2 text-sm font-semibold ${quietMode ? 'border-slate-600 bg-slate-800 text-slate-300' : 'border-cyan-400/40 bg-cyan-400/10 text-cyan-200'}`} title="Toggle sound & notification alerts">{quietMode ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}{quietMode ? 'Alerts off' : 'Alerts on'}</button>
         {active && auto && (
           <button onClick={() => setPaused((value) => !value)} className={`border px-3 py-2 text-sm font-semibold ${paused ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200' : 'border-slate-600 bg-slate-800 text-slate-300'}`}>{paused ? '▶ Resume monitoring' : '⏸ Pause monitoring'}</button>
         )}

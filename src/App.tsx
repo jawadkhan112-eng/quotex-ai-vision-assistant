@@ -6,6 +6,7 @@ import { AlgorithmLabView } from './components/AlgorithmLabView';
 import { SignalTerminalView } from './components/SignalTerminalView';
 import { MtgTrackerView } from './components/MtgTrackerView';
 import { DiagnosticsView } from './components/DiagnosticsView';
+import { AlertsCenterView } from './components/AlertsCenterView';
 import { Sidebar, type TabId } from './components/Sidebar';
 
 export default function App() {
@@ -29,6 +30,7 @@ export default function App() {
           {tab === 'signal_terminal' && <SignalTerminalView />}
           {tab === 'mtg_tracker' && <MtgTrackerView />}
           {tab === 'diagnostics' && <DiagnosticsView />}
+          {tab === 'alerts_center' && <AlertsCenterView />}
         </main>
       </div>
     </div>

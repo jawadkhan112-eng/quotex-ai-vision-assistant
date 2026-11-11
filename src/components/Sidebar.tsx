@@ -1,7 +1,7 @@
 import React from 'react';
-import { Activity, Camera, FlaskConical, RadioTower, Layers, Stethoscope, Zap } from 'lucide-react';
+import { Activity, Camera, FlaskConical, RadioTower, Layers, Stethoscope, BellRing, Zap } from 'lucide-react';
 
-export type TabId = 'live' | 'screenshot_lab' | 'algorithm_lab' | 'signal_terminal' | 'mtg_tracker' | 'diagnostics';
+export type TabId = 'live' | 'screenshot_lab' | 'algorithm_lab' | 'signal_terminal' | 'mtg_tracker' | 'diagnostics' | 'alerts_center';
 
 const TABS: Array<{ id: TabId; label: string; icon: React.ReactNode }> = [
   { id: 'live', label: 'Live Analyzer', icon: <Activity className="h-4 w-4" /> },
@@ -10,6 +10,7 @@ const TABS: Array<{ id: TabId; label: string; icon: React.ReactNode }> = [
   { id: 'signal_terminal', label: 'Signal Terminal', icon: <RadioTower className="h-4 w-4" /> },
   { id: 'mtg_tracker', label: 'MTG Tracker', icon: <Layers className="h-4 w-4" /> },
   { id: 'diagnostics', label: 'Diagnostics', icon: <Stethoscope className="h-4 w-4" /> },
+  { id: 'alerts_center', label: 'Alerts Center', icon: <BellRing className="h-4 w-4" /> },
 ];
 
 export const Sidebar: React.FC<{ activeTab: TabId; onNavigate: (tab: TabId) => void }> = ({ activeTab, onNavigate }) => (

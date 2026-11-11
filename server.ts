@@ -107,6 +107,59 @@ app.delete('/api/screenshots/:id', (req, res) => {
   try { db.prepare('DELETE FROM screenshot_analyses WHERE id = ?').run(req.params.id); res.json({ success: true }); } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
 });
 
+// ---- Signal records: unique-ID persistence, outcome verification ----
+app.post('/api/signals', (req, res) => {
+  const { result, symbol, inputSource = 'LIVE_FRAME' } = req.body || {};
+  if (!result?.signalId || !result?.signal) return res.status(400).json({ success: false, error: 'A valid analysis result with signalId and signal is required.' });
+  try {
+    db.prepare("INSERT OR IGNORE INTO signals (signal_id, created_at, symbol, timeframe, signal, confidence, action_badge, expiry_label, timing_status, entry_window_seconds, chart_valid, reasoning, input_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+      String(result.signalId), new Date().toISOString(), symbol ?? null, String(result.detectedTimeframe ?? '1M'),
+      result.signal, result.confidenceScore ?? 0, result.actionBadge ?? null, result.expiry?.label ?? null,
+      result.timingStatus ?? 'UNVERIFIED', result.entryWindowSeconds ?? 15,
+      result.chartDetection?.isChart ? 1 : 0, result.reasoning ?? null, String(inputSource)
+    );
+    res.json({ success: true, local: true });
+  } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+app.get('/api/signals', (req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM signals ORDER BY id DESC LIMIT ?').all(Math.min(Number(req.query.limit) || 50, 200));
+    const stats = db.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) AS wins, SUM(CASE WHEN outcome = 'LOSS' THEN 1 ELSE 0 END) AS losses FROM signals WHERE outcome IS NOT NULL").get();
+    res.json({ success: true, signals: rows, verifiedStats: stats, local: true });
+  } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+app.post('/api/signals/:signalId/outcome', (req, res) => {
+  const { outcome } = req.body || {};
+  if (!['WIN', 'LOSS', 'DRAW', 'UNKNOWN'].includes(outcome)) return res.status(400).json({ success: false, error: 'outcome must be WIN, LOSS, DRAW or UNKNOWN.' });
+  try {
+    const info = db.prepare('UPDATE signals SET outcome = ?, outcome_verified_at = ? WHERE signal_id = ?').run(outcome, new Date().toISOString(), req.params.signalId);
+    if (info.changes === 0) return res.status(404).json({ success: false, error: 'Signal not found.' });
+    const updated = db.prepare('SELECT * FROM signals WHERE signal_id = ?').get(req.params.signalId);
+    res.json({ success: true, signal: updated, local: true });
+  } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+// ---- Alert log (records which channels actually fired per signal) ----
+app.post('/api/alerts', (req, res) => {
+  const { signalId, channels } = req.body || {};
+  if (!signalId || !Array.isArray(channels)) return res.status(400).json({ success: false, error: 'signalId and channels array are required.' });
+  try {
+    const insert = db.prepare('INSERT INTO alert_log (created_at, signal_id, channel) VALUES (?, ?, ?)');
+    const now = new Date().toISOString();
+    for (const channel of channels) insert.run(now, String(signalId), String(channel));
+    res.json({ success: true, local: true });
+  } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+app.get('/api/alerts', (req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM alert_log ORDER BY id DESC LIMIT ?').all(Math.min(Number(req.query.limit) || 100, 500));
+    res.json({ success: true, alerts: rows, local: true });
+  } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
+});
+
 app.get('/api/history', (req, res) => { try { const limit = Math.min(Number(req.query.limit) || 50, 200); res.json({ success: true, history: db.prepare('SELECT * FROM analysis_history ORDER BY id DESC LIMIT ?').all(limit) }); } catch (error: any) { res.status(500).json({ success: false, error: error.message }); } });
 app.delete('/api/history/:id', (req, res) => { try { db.prepare('DELETE FROM analysis_history WHERE id = ?').run(req.params.id); res.json({ success: true }); } catch (error: any) { res.status(500).json({ success: false, error: error.message }); } });
 app.delete('/api/history', (_req, res) => { try { db.prepare('DELETE FROM analysis_history').run(); res.json({ success: true }); } catch (error: any) { res.status(500).json({ success: false, error: error.message }); } });
