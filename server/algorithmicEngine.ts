@@ -45,6 +45,87 @@ export interface ConfluenceBreakdown {
   score: number; // weighted 0 - 100
 }
 
+export const NO_CHART_REASON = 'No valid trading chart detected on shared screen. Please share your Quotex chart window.';
+
+export interface ChartDetectionResult {
+  isChart: boolean;
+  score: number; // 0 - 100
+  reason: string;
+}
+
+/**
+ * Smart chart-content validator. Scans the captured canvas frame to verify that a
+ * trading chart (candle bodies, wicks, or vertical candle-stroke structure) is
+ * actually present. Documents, chat windows, web pages and other non-chart content
+ * fail instantly so no trading math is computed on them.
+ */
+export function detectChartPresence(frame?: { width: number; height: number; pixels: number[] }): ChartDetectionResult {
+  if (!frame || !Array.isArray(frame.pixels) || frame.pixels.length < 4 || frame.width < 8 || frame.height < 8) {
+    return { isChart: false, score: 0, reason: 'No captured frame available for chart validation.' };
+  }
+
+  const { width, height, pixels } = frame;
+  const px = (x: number, y: number) => {
+    const i = (y * width + x) * 4;
+    return { r: pixels[i], g: pixels[i + 1], b: pixels[i + 2] };
+  };
+  const isGreenish = (c: { r: number; g: number; b: number }) => c.g > c.r * 1.1 && c.g > c.b * 1.1;
+  const isReddish = (c: { r: number; g: number; b: number }) => c.r > c.g * 1.1 && c.r > c.b * 1.1;
+  const isSignificant = (c: { r: number; g: number; b: number }) => Math.max(c.r, c.g, c.b) > 60;
+
+  let green = 0;
+  let red = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const c = px(x, y);
+      if (!isSignificant(c)) continue;
+      if (isGreenish(c)) green++;
+      else if (isReddish(c)) red++;
+    }
+  }
+
+  const candlePixels = green + red;
+  const candleRatio = candlePixels / (width * height);
+
+  // Both bull and bear colours present is the strongest chart signature.
+  const balanced = candlePixels > 0 ? Math.min(green, red) / candlePixels : 0;
+
+  // Charts show vertical strokes (candle bodies/wicks): columns where candle
+  // colours are vertically contiguous, unlike scattered text highlights.
+  let strokeColumns = 0;
+  const columnsSampled = Math.min(width, 160);
+  for (let ci = 0; ci < columnsSampled; ci++) {
+    const x = Math.floor((ci * width) / columnsSampled);
+    let run = 0;
+    let bestRun = 0;
+    for (let y = 0; y < height; y++) {
+      const c = px(x, y);
+      if (isSignificant(c) && (isGreenish(c) || isReddish(c))) {
+        run++;
+        if (run > bestRun) bestRun = run;
+      } else run = 0;
+    }
+    if (bestRun >= Math.max(3, height * 0.04)) strokeColumns++;
+  }
+  const strokeRatio = strokeColumns / columnsSampled;
+
+  let score = 0;
+  if (candleRatio >= 0.002 && candleRatio <= 0.6) score += 35;
+  else if (candleRatio > 0.6) score += 0; // solid colour wash, not a chart
+  if (green > 30 && red > 30) score += 25;
+  if (balanced >= 0.1) score += 20;
+  if (strokeRatio >= 0.05) score += 20;
+
+  const isChart = score >= 45 && candleRatio >= 0.002;
+  return {
+    isChart,
+    score: Math.min(100, score),
+    reason: isChart
+      ? `Trading chart detected (score ${score}/100): ${(candleRatio * 100).toFixed(1)}% candle-colour pixels, vertical candle strokes in ${(strokeRatio * 100).toFixed(0)}% of sampled columns.`
+      : NO_CHART_REASON,
+  };
+}
+
 export interface AlgoAnalysisResult {
   signal: SignalDirection;
   confidenceScore: number;
@@ -72,6 +153,12 @@ export interface AlgoAnalysisResult {
   mtg: MtgState;
   /** Explicit statement that the signal applies to the next candle */
   forNextCandle: boolean;
+  /** Smart screen-content validation: does the captured frame actually contain a trading chart? */
+  chartDetection: {
+    isChart: boolean;
+    score: number; // 0 - 100 heuristic confidence that a chart grid/candles/axis is present
+    reason: string;
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -327,6 +414,45 @@ function decideExpiry(input: {
 export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
   const { prices = [], candles, timeframe = '1M', frame, detectedAsset } = input;
 
+  // Smart screen-content validation: when a captured frame is present, verify a
+  // trading chart actually exists before running any indicator math.
+  let chartDetection = detectChartPresence(frame);
+  if (frame && !chartDetection.isChart) {
+    const mtgNow = buildMtg();
+    return {
+      signal: 'WAIT',
+      confidenceScore: 0,
+      evidenceQualityScore: 0,
+      summaryReason: '🟡 WAIT — NO CHART DETECTED',
+      analysisTimestamp: new Date().toISOString(),
+      detectedAsset,
+      detectedTimeframe: timeframe,
+      candleObservation: chartDetection.reason,
+      reasoning: NO_CHART_REASON,
+      trendFilter: 'NEUTRAL',
+      actionBadge: '🟡 WAIT — NO CHART',
+      expiry: {
+        recommendation: 'WAIT',
+        label: 'WAIT (No Chart On Screen)',
+        candles: 0,
+        rationale: 'Switch your screen share to the live Quotex chart tab before requesting signals.',
+      },
+      confluence: {
+        rsiExtreme: false,
+        bollingerBoundaryTouch: false,
+        rejectionWickStrong: false,
+        momentumAligned: false,
+        trendAligned: false,
+        choppyMarket: true,
+        score: 0,
+      },
+      mtg: mtgNow,
+      forNextCandle: false,
+      chartDetection,
+    };
+  }
+  if (!frame) chartDetection = { isChart: false, score: 0, reason: 'No captured frame available for chart validation.' };
+
   const series =
     prices.length >= 2 ? prices : candles && candles.length > 0 ? candles.map((c) => c.close) : [];
 
@@ -463,5 +589,6 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
     },
     mtg,
     forNextCandle: true,
+    chartDetection,
   };
 }

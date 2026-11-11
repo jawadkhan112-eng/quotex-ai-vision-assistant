@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, Camera, Play, Square, Zap, AlertTriangle } from 'lucide-react';
+import { Activity, Camera, Square, Zap, AlertTriangle } from 'lucide-react';
 import type { AlgoAnalysisResult } from '../types';
 
 interface Props { selectedSymbol: string; selectedTimeframe: string; }
@@ -16,7 +16,6 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
   const [error, setError] = useState('');
   const [countdown, setCountdown] = useState(0);
   const [flashNewCandle, setFlashNewCandle] = useState(false);
-  const [lastCandleTime, setLastCandleTime] = useState<Date | null>(null);
 
   useEffect(() => {
     if (active && video.current && stream.current) video.current.srcObject = stream.current;
@@ -73,7 +72,6 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
       }
       if (second >= 0 && second < 2 && openedForMinute !== now.getMinutes()) {
         openedForMinute = now.getMinutes();
-        setLastCandleTime(now);
         setFlashNewCandle(true);
         window.setTimeout(() => setFlashNewCandle(false), 3000); // flash alert at new candle open
       }
@@ -113,6 +111,9 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
         <button onClick={() => void run()} disabled={working} className="flex items-center gap-2 bg-cyan-400 px-4 py-2 text-sm font-bold text-slate-950 disabled:opacity-50"><Zap className="h-4 w-4" />{working ? 'Calculating…' : 'Analyse now'}</button>
       </div>
     </div>
+    {result && !result.chartDetection.isChart && (
+      <div className="mb-4 flex items-start gap-3 border-2 border-amber-400 bg-amber-400/10 p-4 text-amber-200"><AlertTriangle className="mt-.5 h-6 w-6 shrink-0" /><div><p className="font-bold">No valid trading chart detected on shared screen</p><p className="mt-1 text-sm">Switch your screen share to the live Quotex chart window/tab, then let auto-monitoring re-validate the frame. No trading signals are generated from non-chart content.</p>{active && <p className="mt-1 font-mono text-xs">Validator score: {result.chartDetection.score}/100</p>}</div></div>
+    )}
     {flashNewCandle && result && result.signal !== 'WAIT' && (
       <div className={`mb-4 animate-pulse border-2 p-4 text-center text-lg font-black tracking-widest ${badgeTone}`}>⚡ NEW CANDLE OPEN — {badgeLabel} · {result.confidenceScore}% confluence · For Next Candle Expiry</div>
     )}

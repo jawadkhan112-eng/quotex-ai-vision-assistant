@@ -36,4 +36,5 @@ export interface AlgoAnalysisResult {
   confluence: { rsiExtreme: boolean; bollingerBoundaryTouch: boolean; rejectionWickStrong: boolean; momentumAligned: boolean; trendAligned: boolean; choppyMarket: boolean; score: number };
   mtg: { level: 'BASE' | 'MTG_LEVEL_1' | 'MTG_LEVEL_2'; consecutiveFailures: number; lastSignal?: 'CALL' | 'PUT' | 'WAIT'; lastOutcome?: 'WIN' | 'LOSS'; riskWarning?: string };
   forNextCandle: boolean;
+  chartDetection: { isChart: boolean; score: number; reason: string };
 }
