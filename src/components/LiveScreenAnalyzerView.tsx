@@ -193,6 +193,9 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
             <Metric label="Upper / lower wick" value={`${((result.candle?.upperWickRatio ?? 0) * 100).toFixed(0)}% / ${((result.candle?.lowerWickRatio ?? 0) * 100).toFixed(0)}%`} />
             <Metric label="Wick rejection" value={result.candle?.rejection ?? '—'} />
             <Metric label="Momentum" value={result.candle?.momentum ?? '—'} />
+            <Metric label="Candle pattern" value={result.pattern?.pattern.replace('_', ' ') ?? '—'} />
+            <Metric label="Buyer / seller pressure" value={result.pattern ? `${result.pattern.pressure.dominant} (${result.pattern.pressure.strength}%)` : '—'} />
+            <Metric label="Next-candle prediction" value={result.nextCandlePrediction.prediction.replace(/_/g, ' ')} />
             <Metric label="Trend filter" value={result.trendFilter} />
           </div>
         )}
@@ -210,6 +213,8 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
       <p className="mt-3 text-sm leading-6 text-slate-300">{result.reasoning || result.summaryReason}</p>
       <p className="mt-2 font-mono text-xs text-slate-400">{result.candleObservation}</p>
       <p className="mt-2 font-mono text-xs text-slate-500">{result.expiry.rationale}</p>
+      {result.pattern && <p className="mt-2 font-mono text-xs text-slate-500">{result.pattern.description}</p>}
+      {result.nextCandlePrediction.prediction !== 'NONE' && <p className="mt-2 text-sm text-cyan-300">🔮 Prediction: {result.nextCandlePrediction.rationale}</p>}
     </article>}
     <canvas ref={canvas} className="hidden" />
   </section>;

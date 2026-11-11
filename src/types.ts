@@ -37,4 +37,6 @@ export interface AlgoAnalysisResult {
   mtg: { level: 'BASE' | 'MTG_LEVEL_1' | 'MTG_LEVEL_2'; consecutiveFailures: number; lastSignal?: 'CALL' | 'PUT' | 'WAIT'; lastOutcome?: 'WIN' | 'LOSS'; riskWarning?: string; recoveryTarget: number; requiredConfluence: number; stakeMultiplier: number };
   forNextCandle: boolean;
   chartDetection: { isChart: boolean; score: number; reason: string };
+  pattern?: { pattern: string; implication: string; pressure: { buyers: number; sellers: number; dominant: string; strength: number }; description: string };
+  nextCandlePrediction: { prediction: string; rationale: string };
 }

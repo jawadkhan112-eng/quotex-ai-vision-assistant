@@ -169,6 +169,10 @@ export interface AlgoAnalysisResult {
   mtg: MtgState;
   /** Explicit statement that the signal applies to the next candle */
   forNextCandle: boolean;
+  /** Advanced candle-shape recognition from pixel + geometry analysis */
+  pattern?: PatternAnalysis;
+  /** Explicit next-candle prediction derived from pattern + indicator confluence */
+  nextCandlePrediction: { prediction: PatternAnalysis['implication']; rationale: string };
   /** Smart screen-content validation: does the captured frame actually contain a trading chart? */
   chartDetection: {
     isChart: boolean;
@@ -248,6 +252,97 @@ export function measureCandle(candle: Candle): CandleMetrics {
     candle.close > candle.open ? 'BULLISH' : candle.close < candle.open ? 'BEARISH' : 'NEUTRAL';
 
   return { bodyRatio, upperWickRatio, lowerWickRatio, rejection, momentum };
+}
+
+export type CandlePattern =
+  | 'PINBAR'
+  | 'HAMMER'
+  | 'SHOOTING_STAR'
+  | 'MARUBOZU'
+  | 'DOJI'
+  | 'SPINNING_TOP'
+  | 'NONE';
+
+export interface PatternAnalysis {
+  pattern: CandlePattern;
+  /** Direction the pattern statistically implies for the NEXT candle */
+  implication: 'REVERSAL_BULLISH' | 'REVERSAL_BEARISH' | 'CONTINUATION_BULLISH' | 'CONTINUATION_BEARISH' | 'NONE';
+  /** Buyers (green) vs sellers (red) pixel dominance — candle pressure */
+  pressure: { buyers: number; sellers: number; dominant: 'BUYERS' | 'SELLERS' | 'BALANCED'; strength: number };
+  description: string;
+}
+
+/**
+ * Classifies the latest candle into a classical pattern from its body-to-wick
+ * geometry and predicts the next-candle behaviour (reversal vs continuation).
+ */
+export function classifyCandlePattern(candle: Candle, metrics: CandleMetrics): PatternAnalysis['pattern'] {
+  const { bodyRatio, upperWickRatio, lowerWickRatio } = metrics;
+  if (bodyRatio >= 0.9) return 'MARUBOZU';
+  if (bodyRatio < 0.1) return 'DOJI';
+  if (lowerWickRatio >= 0.55 && lowerWickRatio > upperWickRatio * 2) return 'HAMMER';
+  if (upperWickRatio >= 0.55 && upperWickRatio > lowerWickRatio * 2) return 'SHOOTING_STAR';
+  if ((lowerWickRatio >= 0.5 || upperWickRatio >= 0.5) && bodyRatio <= 0.3) return 'PINBAR';
+  if (bodyRatio >= 0.55) return 'MARUBOZU';
+  return 'SPINNING_TOP';
+}
+
+/**
+ * Pixel-level buyer/seller pressure: counts green vs red candle pixels to measure
+ * which side is dominating the current candle formation and wick rejections.
+ */
+export function measurePixelPressure(frame?: { width: number; height: number; pixels: number[] }): PatternAnalysis['pressure'] {
+  if (!frame || !Array.isArray(frame.pixels) || frame.pixels.length < 4) {
+    return { buyers: 0, sellers: 0, dominant: 'BALANCED', strength: 0 };
+  }
+  const { width, height, pixels } = frame;
+  let buyers = 0;
+  let sellers = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      const r = pixels[i];
+      const g = pixels[i + 1];
+      const b = pixels[i + 2];
+      if (Math.max(r, g, b) <= 60) continue;
+      if (g > r * 1.1 && g > b * 1.1) buyers++;
+      else if (r > g * 1.1 && r > b * 1.1) sellers++;
+    }
+  }
+  const total = buyers + sellers;
+  const dominant: PatternAnalysis['pressure']['dominant'] =
+    total === 0 ? 'BALANCED' : buyers / total > 0.6 ? 'BUYERS' : sellers / total > 0.6 ? 'SELLERS' : 'BALANCED';
+  const strength = total === 0 ? 0 : Math.round(Math.abs(buyers - sellers) / total * 100);
+  return { buyers, sellers, dominant, strength };
+}
+
+/**
+ * Predictive next-candle logic: combines pattern, RSI extreme, and Bollinger
+ * position to predict REVERSAL or CONTINUATION for the next candle.
+ */
+export function predictNextCandle(input: {
+  pattern: CandlePattern;
+  rejection: 'BULLISH' | 'BEARISH' | 'NONE';
+  momentum: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  rsiExtremeStrict: boolean;
+  rsi?: number;
+  bollingerStatus?: 'NEAR_LOWER' | 'NEAR_UPPER' | 'WITHIN_BANDS';
+  bodyRatio: number;
+}): PatternAnalysis['implication'] {
+  const reversalSide = input.rejection === 'BULLISH' ? 'REVERSAL_BULLISH' : input.rejection === 'BEARISH' ? 'REVERSAL_BEARISH' : null;
+  // Strong rejection wick at outer band with extreme RSI → reversal prediction.
+  if (reversalSide && input.rsiExtremeStrict && (input.bollingerStatus === 'NEAR_LOWER' || input.bollingerStatus === 'NEAR_UPPER')) {
+    return reversalSide;
+  }
+  // Solid body closing near outer band with momentum → continuation push.
+  if (input.bodyRatio >= 0.55 && (input.bollingerStatus === 'NEAR_LOWER' || input.bollingerStatus === 'NEAR_UPPER')) {
+    return input.momentum === 'BULLISH' ? 'CONTINUATION_BULLISH' : input.momentum === 'BEARISH' ? 'CONTINUATION_BEARISH' : 'NONE';
+  }
+  // Pattern-driven fallbacks.
+  if (input.pattern === 'MARUBOZU') return input.momentum === 'BULLISH' ? 'CONTINUATION_BULLISH' : input.momentum === 'BEARISH' ? 'CONTINUATION_BEARISH' : 'NONE';
+  if (input.pattern === 'HAMMER') return 'REVERSAL_BULLISH';
+  if (input.pattern === 'SHOOTING_STAR') return 'REVERSAL_BEARISH';
+  return 'NONE';
 }
 
 /* ------------------------------------------------------------------ */
@@ -472,6 +567,7 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
       mtg: mtgNow,
       forNextCandle: false,
       chartDetection,
+      nextCandlePrediction: { prediction: 'NONE', rationale: 'Non-chart content — no prediction possible.' },
     };
   }
   if (!frame) chartDetection = { isChart: false, score: 0, reason: 'No captured frame available for chart validation.' };
@@ -588,6 +684,22 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
 
   const parts: string[] = [];
   if (finite(rsi)) parts.push(`RSI(14) ${rsi!.toFixed(1)} (${rsiZone})`);
+
+  // Advanced pattern recognition + predictive next-candle logic.
+  const patternName = lastCandle && candleMetrics ? classifyCandlePattern(lastCandle, candleMetrics) : 'NONE';
+  const pixelPressure = measurePixelPressure(frame);
+  const nextPrediction = predictNextCandle({
+    pattern: patternName,
+    rejection: candleMetrics?.rejection ?? 'NONE',
+    momentum: candleMetrics?.momentum ?? 'NEUTRAL',
+    rsiExtremeStrict,
+    rsi,
+    bollingerStatus: bollingerInfo?.status,
+    bodyRatio: candleMetrics?.bodyRatio ?? 0,
+  });
+  if (patternName !== 'NONE') parts.push(`pattern ${patternName.replace('_', ' ').toLowerCase()}`);
+  if (nextPrediction !== 'NONE') parts.push(`next-candle ${nextPrediction.replace('_', ' ').toLowerCase()} prediction`);
+  if (pixelPressure.dominant !== 'BALANCED') parts.push(`${pixelPressure.dominant.toLowerCase()} dominating (${pixelPressure.strength}% pressure)`);
   if (bollingerInfo) parts.push(`Bollinger ${bollingerInfo.status.replace('_', ' ').toLowerCase()} (bandwidth ${(bollingerInfo.bandwidth * 100).toFixed(2)}%)`);
   if (candleMetrics) parts.push(`${candleMetrics.rejection.toLowerCase()} rejection wick ${(Math.max(candleMetrics.upperWickRatio, candleMetrics.lowerWickRatio) * 100).toFixed(0)}%`);
   if (swing) parts.push(`${swing.type.toLowerCase()} @ ${swing.level.toFixed(5)} (strength ${swing.strength})`);
@@ -631,5 +743,22 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
     mtg,
     forNextCandle: true,
     chartDetection,
+    pattern: {
+      pattern: patternName,
+      implication: nextPrediction,
+      pressure: pixelPressure,
+      description: patternName === 'NONE'
+        ? 'No classical candle pattern detected.'
+        : `${patternName.replace('_', ' ')} formation detected (body ${(candleMetrics?.bodyRatio ?? 0) * 100 > 0 ? ((candleMetrics?.bodyRatio ?? 0) * 100).toFixed(0) : '0'}% of range).`,
+    },
+    nextCandlePrediction: {
+      prediction: nextPrediction,
+      rationale:
+        nextPrediction.startsWith('REVERSAL')
+          ? `Strong rejection wick at outer Bollinger band with RSI extreme — predicting next-candle ${nextPrediction.includes('BULLISH') ? 'bullish reversal' : 'bearish reversal'}.`
+          : nextPrediction.startsWith('CONTINUATION')
+            ? `Solid ${((candleMetrics?.bodyRatio ?? 0) * 100).toFixed(0)}% body closing near the outer band with momentum — predicting short-term 1M/2M ${nextPrediction.includes('BULLISH') ? 'bullish' : 'bearish'} push (continuation).`
+            : 'Mixed signals — no directional next-candle prediction.',
+    },
   };
 }
