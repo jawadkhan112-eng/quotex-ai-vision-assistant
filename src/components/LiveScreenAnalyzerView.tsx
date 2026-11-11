@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, Camera, Play, Square } from 'lucide-react';
+import { Activity, Camera, Play, Square, Zap, AlertTriangle } from 'lucide-react';
 import type { AlgoAnalysisResult } from '../types';
 
 interface Props { selectedSymbol: string; selectedTimeframe: string; }
@@ -12,8 +12,10 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
   const [active, setActive] = useState(false);
   const [auto, setAuto] = useState(false);
   const [working, setWorking] = useState(false);
+  const [result, setResult] = useState<AlgoAnalysisResult | null>(null);
+  const [error, setError] = useState('');
   const [countdown, setCountdown] = useState(0);
-  const [showFlashing, setShowFlashing] = useState(false);
+  const [flashNewCandle, setFlashNewCandle] = useState(false);
   const [lastCandleTime, setLastCandleTime] = useState<Date | null>(null);
 
   useEffect(() => {
@@ -24,7 +26,7 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     setWorking(true); setError('');
     try {
       let frame: { width: number; height: number; pixels: number[] } | undefined;
-      if (active && video.current && canvas.current) {
+      if (active && video.current && canvas.current && video.current.videoWidth > 0) {
         const context = canvas.current.getContext('2d', { willReadFrequently: true });
         canvas.current.width = 320; canvas.current.height = 180;
         context?.drawImage(video.current, 0, 0, 320, 180);
@@ -38,55 +40,123 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     finally { setWorking(false); }
   }, [active, selectedSymbol, selectedTimeframe]);
 
+  // Continuous background frame ingestion: lightweight polling captures new frames constantly.
   useEffect(() => {
-    if (!auto) return;
-    void run();
-    const timer = window.setInterval(() => void run(), 1000); // High-frequency 1-second polling when auto monitoring
-    return () => window.clearInterval(timer);
-  }, [auto, run]);
-  // Candle closure timer - synchronizes with 1M candle closure at final 10 seconds
-  useEffect(() => {
-    if (!auto) return;
-    const updateCountdown = () => {
-      const now = new Date();
-      const seconds = now.getSeconds();
-      const toClosure = 60 - seconds;
-      const msUntilClosure = toClosure * 1000;
-      setCountdown(msUntilClosure);
-      // Trigger analysis in the final 10 seconds of the candle
-      if (msUntilClosure <= 10000 && msUntilClosure > 0) {
-        setLastCandleTime(new Date());
-        void run();
+    if (!auto || !active) return;
+    const ingest = () => {
+      if (video.current && canvas.current && video.current.videoWidth > 0) {
+        const context = canvas.current.getContext('2d', { willReadFrequently: true });
+        canvas.current.width = 320; canvas.current.height = 180;
+        context?.drawImage(video.current, 0, 0, 320, 180);
       }
     };
-    updateCountdown(); // Initial call
-    const interval = setInterval(updateCountdown, 1000);
-    return () => clearInterval(interval);
-  }, [auto, run]);
+    ingest();
+    const timer = window.setInterval(ingest, 500);
+    return () => window.clearInterval(timer);
+  }, [auto, active]);
+
+  // Candle-close synchronised analysis: heavy math runs in the final 10s, signal fires at new-candle open.
+  const runRef = useRef(run);
+  runRef.current = run;
+  useEffect(() => {
+    if (!auto) return;
+    let firedForMinute: number | null = null;
+    let openedForMinute: number | null = null;
+    const tick = () => {
+      const now = new Date();
+      const second = now.getSeconds();
+      const toClosure = 60 - second;
+      setCountdown(toClosure);
+      if (second >= 50 && second < 60 && firedForMinute !== now.getMinutes()) {
+        firedForMinute = now.getMinutes();
+        void runRef.current(); // pre-close analysis in the final 10 seconds
+      }
+      if (second >= 0 && second < 2 && openedForMinute !== now.getMinutes()) {
+        openedForMinute = now.getMinutes();
+        setLastCandleTime(now);
+        setFlashNewCandle(true);
+        window.setTimeout(() => setFlashNewCandle(false), 3000); // flash alert at new candle open
+      }
+    };
+    tick();
+    const interval = window.setInterval(tick, 1000);
+    return () => window.clearInterval(interval);
+  }, [auto]);
 
   const start = async () => {
     try {
       stream.current = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      stream.current.getVideoTracks()[0]?.addEventListener('ended', stop);
       setActive(true);
     } catch { setError('Screen sharing was not granted. You can still run deterministic price analysis.'); }
   };
   const stop = () => { stream.current?.getTracks().forEach((track) => track.stop()); stream.current = null; setActive(false); setAuto(false); };
-  const tone = result?.signal === 'CALL' ? 'border-emerald-400 bg-emerald-400/10 text-emerald-300' : result?.signal === 'PUT' ? 'border-rose-400 bg-rose-400/10 text-rose-300' : 'border-amber-400 bg-amber-400/10 text-amber-300';
+
+  const badgeTone =
+    result?.signal === 'CALL'
+      ? 'border-emerald-400 bg-emerald-400/10 text-emerald-300'
+      : result?.signal === 'PUT'
+        ? 'border-rose-400 bg-rose-400/10 text-rose-300'
+        : 'border-amber-400 bg-amber-400/10 text-amber-300';
+  const badgeLabel = result
+    ? result.expiry.recommendation === 'WAIT'
+      ? '🟡 WAIT'
+      : result.actionBadge
+    : '🟡 WAIT';
 
   return <section className="mx-auto max-w-7xl p-5 lg:p-8">
     <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
-      <div><p className="font-mono text-[11px] uppercase tracking-[.24em] text-cyan-400">Local / deterministic / zero API keys</p><h2 className="mt-2 text-2xl font-bold tracking-tight">Algorithmic Trading & Technical Analysis Terminal</h2></div>
-      <button onClick={() => setAuto((value) => !value)} className="border border-cyan-400/40 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-200"><span className="text-sm font-medium text-cyan-200">{result.confidenceScore}% Sureshot</span></button>
-    </div>
-    <div className="grid gap-5 lg:grid-cols-[1.25fr_.75fr]">
-      <div className="border border-slate-800 bg-slate-900/70 p-5"><div className="flex items-center justify-between border-b border-slate-800 pb-3"><span className="text-sm font-semibold">Chart frame input</span><span className="font-mono text-xs text-slate-400">{selectedSymbol} · {selectedTimeframe}</span></div>
-        <div className="relative mt-4 grid aspect-video place-items-center overflow-hidden border border-slate-800 bg-slate-950"><video ref={video} autoPlay muted className={active ? 'h-full w-full object-contain' : 'hidden'} />{!active && <div className="text-center text-slate-500"><Camera className="mx-auto mb-2 h-8 w-8" /><p className="text-sm">Optional local screen frame</p><p className="mt-1 text-xs">Pixels never leave this terminal.</p></div>}</div>
-        <div className="mt-4 flex flex-wrap gap-3"><button onClick={active ? stop : start} className="flex items-center gap-2 border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium">{active ? <Square className="h-4 w-4" /> : <Camera className="h-4 w-4" />}{active ? 'Stop screen share' : 'Share chart screen'}</button><button disabled={working} onClick={() => void run()} className="flex items-center gap-2 bg-cyan-400 px-5 py-2 text-sm font-bold text-slate-950 disabled:opacity-50"><Play className="h-4 w-4" />{working ? 'Calculating…' : 'Run Algorithmic Analysis'}</button></div>
+      <div><p className="font-mono text-[11px] uppercase tracking-[.24em] text-cyan-400">Local / deterministic / zero API keys</p><h2 className="mt-2 text-2xl font-bold tracking-tight">Algorithmic Trading &amp; Technical Analysis Terminal</h2></div>
+      <div className="flex items-center gap-3">
+        {auto && <span className="font-mono text-xs text-cyan-300">Next candle close: {countdown}s</span>}
+        <button onClick={() => setAuto((value) => !value)} className={`border px-4 py-2 text-sm font-semibold ${auto ? 'border-rose-400/40 bg-rose-400/10 text-rose-200' : 'border-cyan-400/40 bg-cyan-400/10 text-cyan-200'}`}>{auto ? 'Stop auto-monitoring' : 'Start auto-monitoring'}</button>
+        <button onClick={() => void run()} disabled={working} className="flex items-center gap-2 bg-cyan-400 px-4 py-2 text-sm font-bold text-slate-950 disabled:opacity-50"><Zap className="h-4 w-4" />{working ? 'Calculating…' : 'Analyse now'}</button>
       </div>
-      <div className="border border-slate-800 bg-slate-900/70 p-5"><p className="text-xs font-semibold uppercase tracking-widest text-slate-400">Current mathematical signal</p><div className={`mt-4 border p-5 text-center ${tone}`}><div className="text-4xl font-black tracking-[.18em]">{result?.signal || 'WAIT'}</div><div className="mt-2 font-mono text-sm">{result ? `${result.confidenceScore}% confluence` : 'Awaiting analysis'}</div></div><div className="mt-5 grid grid-cols-2 gap-px overflow-hidden border border-slate-800 bg-slate-800"><Metric label="RSI (14)" value={result?.rsiValue?.toFixed(1) || '—'} /><Metric label="Bollinger" value={result?.bollinger?.status.replace('_', ' ') || '—'} /><Metric label="Body ratio" value={result ? `${((result.candle?.bodyRatio ?? 0) * 100).toFixed(1)}%` : '—'} /><Metric label="Upper / lower wick" value={result ? `${((result.candle?.upperWickRatio ?? 0) * 100).toFixed(0)}% / ${((result.candle?.lowerWickRatio ?? 0) * 100).toFixed(0)}%` : '—'} /><Metric label="Momentum" value={result?.candle?.momentum || '—'} /><Metric label="Wick rejection" value={result?.candle?.rejection || '—'} /></div></div>
+    </div>
+    {flashNewCandle && result && result.signal !== 'WAIT' && (
+      <div className={`mb-4 animate-pulse border-2 p-4 text-center text-lg font-black tracking-widest ${badgeTone}`}>⚡ NEW CANDLE OPEN — {badgeLabel} · {result.confidenceScore}% confluence · For Next Candle Expiry</div>
+    )}
+    <div className="grid gap-5 lg:grid-cols-[1.25fr_.75fr]">
+      <div className="border border-slate-800 bg-slate-900/70 p-5"><div className="flex items-center justify-between border-b border-slate-800 pb-3"><span className="text-sm font-semibold">Chart frame input</span><span className="font-mono text-xs text-slate-400">{selectedSymbol} · {selectedTimeframe}{auto ? ' · continuous scan active' : ''}</span></div>
+        <div className="relative mt-4 grid aspect-video place-items-center overflow-hidden border border-slate-800 bg-slate-950"><video ref={video} autoPlay muted className={active ? 'h-full w-full object-contain' : 'hidden'} />{!active && <div className="text-center text-slate-500"><Camera className="mx-auto mb-2 h-8 w-8" /><p className="text-sm">Optional local screen frame</p><p className="mt-1 text-xs">Pixels never leave this terminal.</p></div>}</div>
+        <div className="mt-4 flex flex-wrap gap-3"><button onClick={active ? stop : start} className="flex items-center gap-2 border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium">{active ? <Square className="h-4 w-4" /> : <Camera className="h-4 w-4" />}{active ? 'Stop screen share' : 'Share chart screen'}</button></div>
+      </div>
+      <div className="border border-slate-800 bg-slate-900/70 p-5"><p className="text-xs font-semibold uppercase tracking-widest text-slate-400">Signal output · for next candle expiry</p>
+        <div className={`mt-4 border p-5 text-center ${badgeTone}`}>
+          <div className="text-3xl font-black tracking-[.12em]">{badgeLabel}</div>
+          <div className="mt-2 font-mono text-sm">{result ? `${result.confidenceScore}% confluence` : 'Awaiting analysis'}</div>
+          <div className="mt-1 font-mono text-xs">{result ? `Recommended expiry: ${result.expiry.label} (${result.expiry.candles > 0 ? `${result.expiry.candles} candle${result.expiry.candles > 1 ? 's' : ''}` : 'stand aside'})` : ''}</div>
+        </div>
+        {result?.mtg && result.mtg.level !== 'BASE' && (
+          <div className="mt-3 border border-amber-400/40 bg-amber-400/10 p-3 text-xs text-amber-200"><span className="flex items-center gap-2 font-bold"><AlertTriangle className="h-4 w-4" />{result.mtg.level.replace('_', ' ')} ACTIVE</span><p className="mt-1">{result.mtg.riskWarning}</p></div>
+        )}
+        {result && (
+          <div className="mt-5 grid grid-cols-2 gap-px overflow-hidden border border-slate-800 bg-slate-800">
+            <Metric label="RSI (14)" value={`${result.rsiValue?.toFixed(1) ?? '—'}${result.rsiZone ? ` · ${result.rsiZone}` : ''}`} />
+            <Metric label="Bollinger position" value={`${result.bollinger ? `${result.bollinger.status.replace('_', ' ')} @ ${(result.bollinger.proximity * 100).toFixed(0)}%` : '—'}`} />
+            <Metric label="Bollinger bandwidth" value={result.bollinger ? `${(result.bollinger.bandwidth * 100).toFixed(2)}%` : '—'} />
+            <Metric label="Body ratio" value={`${((result.candle?.bodyRatio ?? 0) * 100).toFixed(1)}%`} />
+            <Metric label="Upper / lower wick" value={`${((result.candle?.upperWickRatio ?? 0) * 100).toFixed(0)}% / ${((result.candle?.lowerWickRatio ?? 0) * 100).toFixed(0)}%`} />
+            <Metric label="Wick rejection" value={result.candle?.rejection ?? '—'} />
+            <Metric label="Momentum" value={result.candle?.momentum ?? '—'} />
+            <Metric label="Trend filter" value={result.trendFilter} />
+          </div>
+        )}
+      </div>
     </div>
     {error && <p className="mt-4 border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200">{error}</p>}
-    {result && <article className="mt-5 border-l-2 border-cyan-400 bg-slate-900/70 p-5"><div className="flex items-center gap-2 text-sm font-semibold"><Activity className="h-4 w-4 text-cyan-300" />Strict mathematical reasoning</div><p className="mt-2 text-sm leading-6 text-slate-300">{result.reasoning || result.summaryReason}</p><p className="mt-2 font-mono text-xs text-slate-400">{result.candleObservation}</p></article>}
+    {result && <article className="mt-5 border-l-2 border-cyan-400 bg-slate-900/70 p-5"><div className="flex items-center gap-2 text-sm font-semibold"><Activity className="h-4 w-4 text-cyan-300" />Strict mathematical reasoning · confluence breakdown</div>
+      <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-mono">
+        <span className={`border px-2 py-1 ${result.confluence.rsiExtreme ? 'border-emerald-400 text-emerald-300' : 'border-slate-700 text-slate-500'}`}>RSI extreme (&lt;25 / &gt;75): {result.confluence.rsiExtreme ? 'YES' : 'NO'}</span>
+        <span className={`border px-2 py-1 ${result.confluence.bollingerBoundaryTouch ? 'border-emerald-400 text-emerald-300' : 'border-slate-700 text-slate-500'}`}>BB boundary touch: {result.confluence.bollingerBoundaryTouch ? 'YES' : 'NO'}</span>
+        <span className={`border px-2 py-1 ${result.confluence.rejectionWickStrong ? 'border-emerald-400 text-emerald-300' : 'border-slate-700 text-slate-500'}`}>Strong rejection wick: {result.confluence.rejectionWickStrong ? 'YES' : 'NO'}</span>
+        <span className={`border px-2 py-1 ${result.confluence.momentumAligned ? 'border-emerald-400 text-emerald-300' : 'border-slate-700 text-slate-500'}`}>Momentum aligned: {result.confluence.momentumAligned ? 'YES' : 'NO'}</span>
+        <span className="border border-slate-700 px-2 py-1 text-slate-300">Weighted score: {result.confluence.score}%</span>
+      </div>
+      <p className="mt-3 text-sm leading-6 text-slate-300">{result.reasoning || result.summaryReason}</p>
+      <p className="mt-2 font-mono text-xs text-slate-400">{result.candleObservation}</p>
+      <p className="mt-2 font-mono text-xs text-slate-500">{result.expiry.rationale}</p>
+    </article>}
     <canvas ref={canvas} className="hidden" />
   </section>;
 };

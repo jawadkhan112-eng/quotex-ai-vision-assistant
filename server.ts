@@ -3,7 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
 import { db } from './server/db.js';
-import { analyzeAlgorithmic } from './server/algorithmicEngine.js';
+import { analyzeAlgorithmic, reportSignalOutcome, resetMtgState } from './server/algorithmicEngine.js';
 
 dotenv.config();
 const app = express(); const PORT = process.env.PORT || 3000; const isVercel = Boolean(process.env.VERCEL);
@@ -21,6 +21,16 @@ app.post('/api/analyze-algorithmic', (req, res) => {
     res.json({ success: true, result, local: true });
   } catch (error: any) { res.status(400).json({ success: false, error: error.message || 'Algorithmic analysis failed.' }); }
 });
+
+// Martingale (MTG) tracking: report the WIN/LOSS outcome of the last signal so the
+// next analysis is tagged with the correct MTG level.
+app.post('/api/signal-outcome', (req, res) => {
+  const { outcome } = req.body || {};
+  if (outcome !== 'WIN' && outcome !== 'LOSS') return res.status(400).json({ success: false, error: "outcome must be 'WIN' or 'LOSS'." });
+  reportSignalOutcome(outcome);
+  res.json({ success: true, local: true });
+});
+app.post('/api/mtg-reset', (_req, res) => { resetMtgState(); res.json({ success: true, local: true }); });
 
 app.get('/api/history', (req, res) => { try { const limit = Math.min(Number(req.query.limit) || 50, 200); res.json({ success: true, history: db.prepare('SELECT * FROM analysis_history ORDER BY id DESC LIMIT ?').all(limit) }); } catch (error: any) { res.status(500).json({ success: false, error: error.message }); } });
 app.delete('/api/history/:id', (req, res) => { try { db.prepare('DELETE FROM analysis_history WHERE id = ?').run(req.params.id); res.json({ success: true }); } catch (error: any) { res.status(500).json({ success: false, error: error.message }); } });
