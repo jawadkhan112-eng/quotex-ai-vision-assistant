@@ -39,6 +39,8 @@ export interface AlgoAnalysisResult {
   timingStatus: 'VERIFIED' | 'ESTIMATED' | 'UNVERIFIED';
   signalId: string;
   entryWindowSeconds: number;
+  reconstructedCandleCount?: number | null;
+  reconstructionQuality?: string | null;
   chartDetection: { isChart: boolean; score: number; reason: string };
   pattern?: { pattern: string; implication: string; pressure: { buyers: number; sellers: number; dominant: string; strength: number }; description: string };
   nextCandlePrediction: { prediction: string; rationale: string };

@@ -170,10 +170,22 @@ export interface AlgoAnalysisResult {
   mtg: MtgState;
   /** Explicit statement that the signal applies to the next candle */
   forNextCandle: boolean;
+  /** Honest candle-timing verification state. A single-frame request cannot verify
+   * an observed candle transition, so screen analyses are UNVERIFIED; only an
+   * explicit close-observation flow could set VERIFIED. Never fabricated. */
+  timingStatus: 'VERIFIED' | 'ESTIMATED' | 'UNVERIFIED';
+  /** Unique signal identity for alert deduplication and outcome tracking */
+  signalId: string;
+  /** Seconds after candle close within which this is a valid fresh entry */
+  entryWindowSeconds: number;
   /** Advanced candle-shape recognition from pixel + geometry analysis */
   pattern?: PatternAnalysis;
   /** Explicit next-candle prediction derived from pattern + indicator confluence */
   nextCandlePrediction: { prediction: PatternAnalysis['implication']; rationale: string };
+  /** Count of candles visually reconstructed from the frame (null when no frame). */
+  reconstructedCandleCount?: number | null;
+  /** Overall reconstruction quality band for the frame. */
+  reconstructionQuality?: 'GOOD' | 'FAIR' | 'POOR' | null;
   /** Smart screen-content validation: does the captured frame actually contain a trading chart? */
   chartDetection: {
     isChart: boolean;
@@ -585,6 +597,9 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
       forNextCandle: false,
       chartDetection,
       nextCandlePrediction: { prediction: 'NONE', rationale: 'Non-chart content — no prediction possible.' },
+      timingStatus: 'UNVERIFIED' as const,
+      signalId: `SIG-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      entryWindowSeconds: 15,
     };
   }
   if (!frame) chartDetection = { isChart: false, score: 0, reason: 'No captured frame available for chart validation.' };
@@ -629,6 +644,9 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
       forNextCandle: false,
       chartDetection,
       nextCandlePrediction: { prediction: 'NONE' as const, rationale: 'Insufficient reconstructed candle history.' },
+      timingStatus: 'UNVERIFIED' as const,
+      signalId: `SIG-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      entryWindowSeconds: 15,
     };
   }
     prices.length >= 2 ? prices : candles && candles.length > 0 ? candles.map((c) => c.close) : [];
@@ -811,6 +829,9 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
     },
     mtg,
     forNextCandle: true,
+    timingStatus: 'UNVERIFIED' as const,
+    signalId: `SIG-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    entryWindowSeconds: 15,
     chartDetection,
     pattern: {
       pattern: patternName,
@@ -829,5 +850,7 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
             ? `Solid ${((candleMetrics?.bodyRatio ?? 0) * 100).toFixed(0)}% body closing near the outer band with momentum — predicting short-term 1M/2M ${nextPrediction.includes('BULLISH') ? 'bullish' : 'bearish'} push (continuation).`
             : 'Mixed signals — no directional next-candle prediction.',
     },
+    reconstructedCandleCount: reconstruction?.candles.length ?? null,
+    reconstructionQuality: reconstruction?.quality ?? null,
   };
 }

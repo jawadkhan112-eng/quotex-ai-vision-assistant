@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, Camera, Square, Zap, AlertTriangle, Timer, Volume2, VolumeX } from 'lucide-react';
 import type { AlgoAnalysisResult } from '../types';
 import { alertManager } from '../services/alertManager';
-import { detectChartIdentity, disposeOcr } from '../services/chartOcr';
+import { detectChartIdentity, disposeOcr } from '../services/chartIdentityService';
 import { describeIdentityChange, type ChartIdentity } from '../../server/chartIdentity';
 
 interface Props { selectedSymbol: string; selectedTimeframe: string; }
@@ -66,11 +66,11 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
   useEffect(() => {
     if (!active) return;
     const scan = async () => {
-      if (identityRunningRef.current || !canvas.current || canvas.current.width === 0) return;
+      if (identityRunningRef.current || !video.current || video.current.videoWidth === 0) return;
       identityRunningRef.current = true;
       setOcrBusy(true);
       try {
-        const detection = await detectChartIdentity(canvas.current);
+        const detection = await detectChartIdentity(video.current!, video.current!.videoWidth, video.current!.videoHeight);
         setIdentity((previous) => {
           const changes = describeIdentityChange(previous, detection.identity);
           if (changes.length > 0 && previous) {

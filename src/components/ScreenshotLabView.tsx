@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Upload, Camera, Eye, Trash2, Image as ImageIcon } from 'lucide-react';
 import type { AlgoAnalysisResult } from '../types';
-import { detectChartIdentity } from '../services/chartOcr';
-import { describeIdentityChange, type ChartIdentity } from '../../server/chartIdentity';
+import { detectChartIdentity } from '../services/chartIdentityService';
+import { type ChartIdentity } from '../../server/chartIdentity';
 
 interface ScreenshotRow {
   id: number;
@@ -54,7 +54,7 @@ export const ScreenshotLabView: React.FC = () => {
       const pixels = Array.from(ctx.getImageData(0, 0, W, H).data);
       // Independent identity detection on THIS exact screenshot.
       try {
-        const detection = await detectChartIdentity(canvas);
+        const detection = await detectChartIdentity(canvas, image.naturalWidth || canvas.width, image.naturalHeight || canvas.height);
         setShotIdentity(detection.identity);
       } catch { setShotIdentity(null); }
       const res = await fetch('/api/analyze-algorithmic', {

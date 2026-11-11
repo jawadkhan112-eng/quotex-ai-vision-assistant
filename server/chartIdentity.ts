@@ -36,7 +36,9 @@ export interface ChartIdentity {
 
 const CURRENCIES = 'AED|AUD|BDT|BRL|BTC|CAD|CHF|CNY|DKK|DOGE|EGP|ETH|EUR|GBP|HKD|HRK|HUF|IDR|ILS|INR|JPY|KRW|KWD|LTC|MXN|MYR|NGN|NOK|NZD|PHP|PKR|PLN|RON|SAR|SEK|THB|TRY|TWD|USD|XAU|XAG|ZAR';
 
-const PAIR_RE = new RegExp(`\\b(${CURRENCIES})\\s*[/\\\\|-]?\\s*(${CURRENCIES})\\b`, 'i');
+// Real OCR output varies widely: 'EUR/USD', 'EUR / USD', 'EURUSD', 'eur-usd',
+// and slash-less forms when OCR drops punctuation. All must parse.
+const PAIR_RE = new RegExp(`\\b(${CURRENCIES})\\s*[/\\\\|.,;:-]?\\s*(${CURRENCIES})\\b`, 'i');
 const OTC_RE = /\botc\b/i;
 const LIVE_RE = /\b(live|real[- ]?time|real\b)/i;
 
@@ -51,7 +53,7 @@ export function parsePairFromText(text: string): DetectedPair {
   const quote = match[2].toUpperCase();
   if (base === quote) return { pair: 'UNKNOWN', confidence: 0 };
   // Confidence scaled by how clean the match looks: separator required for high confidence.
-  const hasSep = /[/\\|-]/.test(match[0]);
+  const hasSep = /[/\\|.,;:-]/.test(match[0]);
   const cleanContext = /\s/.test(text.slice(0, match.index ?? 0).slice(-2)) || (match.index ?? 0) === 0;
   const confidence = Math.min(98, 60 + (hasSep ? 25 : 0) + (cleanContext ? 10 : 0));
   return { pair: `${base}/${quote}`, confidence };
