@@ -42,15 +42,28 @@ export interface MtgState {
   stakeMultiplier: number;
 }
 
-/** Hard gatekeeper: no CALL/PUT leaves the engine below this confluence. */
-export const MIN_CONFIDENCE_THRESHOLD = 80;
+/** Hard gatekeeper: no CALL/PUT leaves the engine below this confluence.
+ * Opportunity-based threshold: 60/100 qualifies a setup; 80+ is HIGH-QUALITY.
+ * This is a confluence score, NOT a statistically-proven win probability. */
+export const MIN_CONFIDENCE_THRESHOLD = 60;
+/** Score at or above which a setup is classified HIGH-QUALITY (still not a win-rate claim). */
+export const HIGH_QUALITY_THRESHOLD = 80;
 
 /** Required confluence per MTG level — recovery steps demand progressively stricter setups. */
 export const MTG_REQUIRED_CONFLUENCE: Record<MtgLevel, number> = {
   BASE: MIN_CONFIDENCE_THRESHOLD,
-  MTG_LEVEL_1: 85,
-  MTG_LEVEL_2: 90,
+  MTG_LEVEL_1: 70,
+  MTG_LEVEL_2: 80,
 };
+
+/** Adaptive setup classification for the opportunity-based engine. */
+export type SetupClass = 'HIGH-QUALITY' | 'QUALIFIED' | 'DEVELOPING';
+
+export function classifySetup(score: number, evidenceIndependentCount: number): SetupClass {
+  if (score >= HIGH_QUALITY_THRESHOLD && evidenceIndependentCount >= 3) return 'HIGH-QUALITY';
+  if (score >= MIN_CONFIDENCE_THRESHOLD && evidenceIndependentCount >= 2) return 'QUALIFIED';
+  return 'DEVELOPING';
+}
 
 export interface ConfluenceBreakdown {
   rsiExtreme: boolean;
@@ -60,6 +73,21 @@ export interface ConfluenceBreakdown {
   trendAligned: boolean;
   choppyMarket: boolean;
   score: number; // weighted 0 - 100
+}
+
+/** Exact reason a decision did not reach CALL/PUT, plus what would make it eligible. */
+export interface WaitExplanation {
+  blockingCondition: string;
+  missingData: string;
+  requiredConfirmation: string;
+  category: 'OCR' | 'CHART_DETECTION' | 'CANDLE_EXTRACTION' | 'INDICATORS' | 'STRATEGY' | 'TIMING' | 'CONFLICT';
+}
+
+export interface SetupAssessment {
+  classification: SetupClass;
+  /** Number of independent evidence sources aligned with the decided direction. */
+  independentEvidenceCount: number;
+  wait?: WaitExplanation;
 }
 
 export const NO_CHART_REASON = 'No valid trading chart detected on shared screen. Please share your Quotex chart window.';
@@ -192,6 +220,8 @@ export interface AlgoAnalysisResult {
     score: number; // 0 - 100 heuristic confidence that a chart grid/candles/axis is present
     reason: string;
   };
+  /** Adaptive opportunity-based setup assessment (60/100 threshold era). */
+  setup: SetupAssessment;
 }
 
 /* ------------------------------------------------------------------ */
@@ -560,6 +590,11 @@ function decideExpiry(input: {
 
 export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
   const { prices = [], candles, timeframe = '1M', frame, detectedAsset } = input;
+  const waitSetup = (category: SetupAssessment['wait'] extends infer W ? W extends { category: infer C } ? C : never : never, blocking: string, missing: string, required: string): SetupAssessment => ({
+    classification: 'DEVELOPING' as const,
+    independentEvidenceCount: 0,
+    wait: { blockingCondition: blocking, missingData: missing, requiredConfirmation: required, category },
+  });
 
   // Smart screen-content validation: when a captured frame is present, verify a
   // trading chart actually exists before running any indicator math.
@@ -594,6 +629,7 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
         score: 0,
       },
       mtg: mtgNow,
+      setup: waitSetup('CHART_DETECTION', chartDetection.reason, 'A valid Quotex candlestick chart on the shared screen.', 'Share the chart window/tab and retry — signal generation resumes automatically.'),
       forNextCandle: false,
       chartDetection,
       nextCandlePrediction: { prediction: 'NONE', rationale: 'Non-chart content — no prediction possible.' },
@@ -640,6 +676,7 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
       actionBadge: 'WAIT - INSUFFICIENT DATA',
       expiry: { recommendation: 'WAIT' as const, label: 'WAIT (Insufficient Data)', candles: 0, rationale: 'Historical candle data unavailable - indicators cannot be calculated honestly.' },
       confluence: { rsiExtreme: false, bollingerBoundaryTouch: false, rejectionWickStrong: false, momentumAligned: false, trendAligned: false, choppyMarket: true, score: 0 },
+      setup: waitSetup('CANDLE_EXTRACTION', 'Insufficient candle history for indicator calculation.', 'At least 2 visible candles (6+ for RSI/Bollinger).', 'More visible chart history or a supplied candle series.'),
       mtg: buildMtg(),
       forNextCandle: false,
       chartDetection,
@@ -687,7 +724,8 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
         : 'NEUTRAL';
 
   const rsiExtremeStrict = finite(rsi) && (rsi < 25 || rsi > 75);
-  const rsiNeutralZone = finite(rsi) && rsi >= 40 && rsi <= 60;
+  const rsiSupportsCall = finite(rsi) && rsi < 45;
+  const rsiSupportsPut = finite(rsi) && rsi > 55;
   const boundaryTouch = bollingerInfo?.status !== undefined && bollingerInfo.status !== 'WITHIN_BANDS';
   const strongRejection = candleMetrics?.rejection === 'BULLISH' || candleMetrics?.rejection === 'BEARISH';
 
@@ -698,23 +736,51 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
         ? 'PUT'
         : null;
 
-  // Directional agreement across factors
+  /*
+   * Weighted opportunity-based confluence engine (100 points):
+   *   Trend                       20
+   *   Candle / price action       25
+   *   Momentum                    15
+   *   Indicator confirmation      20
+   *   Context / support-resistance 10
+   *   Data reliability            10
+   * A missing indicator contributes 0 but never blocks a valid setup.
+   */
   let agrees = 0;
+  let independentEvidence = 0;
   if (dirBias) {
-    if (rsiExtremeStrict && ((dirBias === 'CALL' && rsi! < 25) || (dirBias === 'PUT' && rsi! > 75))) agrees += 35;
-    if (boundaryTouch && ((dirBias === 'CALL' && bollingerInfo!.status === 'NEAR_LOWER') || (dirBias === 'PUT' && bollingerInfo!.status === 'NEAR_UPPER'))) agrees += 30;
-    if (strongRejection && ((dirBias === 'CALL' && candleMetrics!.rejection === 'BULLISH') || (dirBias === 'PUT' && candleMetrics!.rejection === 'BEARISH'))) agrees += 25;
-    if ((dirBias === 'CALL' && trendFilter === 'BULLISH') || (dirBias === 'PUT' && trendFilter === 'BEARISH')) agrees += 10;
-    if ((dirBias === 'CALL' && candleMetrics?.momentum === 'BULLISH') || (dirBias === 'PUT' && candleMetrics?.momentum === 'BEARISH')) agrees += 5;
+    const forCall = dirBias === 'CALL';
+    // Trend group (max 20)
+    if ((forCall && trendFilter === 'BULLISH') || (!forCall && trendFilter === 'BEARISH')) { agrees += 14; independentEvidence++; }
+    else if (trendFilter !== 'NEUTRAL') agrees -= 6;
+    // Candle / price-action group (max 25)
+    if (strongRejection && ((forCall && candleMetrics!.rejection === 'BULLISH') || (!forCall && candleMetrics!.rejection === 'BEARISH'))) { agrees += 15; independentEvidence++; }
+    if ((forCall && candleMetrics?.momentum === 'BULLISH') || (!forCall && candleMetrics?.momentum === 'BEARISH')) { agrees += 10; independentEvidence++; }
+    // Momentum group (max 15): RSI directional support — moderate zones count, extremes are NOT mandatory.
+    if (forCall && rsiSupportsCall) { agrees += 10; independentEvidence++; }
+    if (!forCall && rsiSupportsPut) { agrees += 10; independentEvidence++; }
+    if (rsiExtremeStrict && ((forCall && rsi! < 25) || (!forCall && rsi! > 75))) agrees += 5;
+    // Indicator-confirmation group (max 20)
+    if (boundaryTouch && ((forCall && bollingerInfo!.status === 'NEAR_LOWER') || (!forCall && bollingerInfo!.status === 'NEAR_UPPER'))) { agrees += 12; independentEvidence++; }
+    const emaFast = calculateEMA(series, 9);
+    const emaSlow = calculateEMA(series, 20);
+    if (emaFast !== undefined && emaSlow !== undefined && ((forCall && emaFast > emaSlow) || (!forCall && emaFast < emaSlow))) { agrees += 8; independentEvidence++; }
+    // Context group (max 10)
+    if (nearMajorLevel) agrees += 6;
+    // Data-reliability group (max 10)
+    const dataReliability =
+      (seriesSource === 'PRICES' || seriesSource === 'OHLC' ? 6 : seriesSource === 'RECONSTRUCTED' ? 4 : 0) +
+      (candleMetrics ? 4 : 0);
+    agrees += dataReliability;
+    if (dataReliability >= 6) independentEvidence++;
   }
 
   const choppy =
-    (!boundaryTouch && rsiNeutralZone) ||
     (candleMetrics !== undefined && candleMetrics.bodyRatio < 0.25 && Math.abs(candleMetrics.upperWickRatio - candleMetrics.lowerWickRatio) < 0.1) ||
     (bb !== undefined && bb.bandwidth < 0.002);
 
   const mtg = buildMtg();
-  const confidenceBase = Math.min(98, Math.round(agrees));
+  const confidenceBase = Math.max(0, Math.min(98, Math.round(agrees)));
   const confidenceScore = mtg.level === 'BASE' ? confidenceBase : Math.round(confidenceBase * 0.9);
 
   // Clean-formation check: messy candles (doji, spinning top, tiny ambiguous
@@ -726,27 +792,59 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
     patternNameEarly !== 'DOJI' &&
     patternNameEarly !== 'SPINNING_TOP';
 
-  // Strict 80%+ high-confidence gatekeeper. A CALL/PUT only leaves the engine when
-  // ALL of the following hold: clean candle formation, RSI extreme (<25 / >75),
-  // Bollinger outer-band touch/pierce, prominent rejection wick, non-choppy market,
-  // and confluence above the level-specific threshold (80% base / 85% MTG1 / 90% MTG2).
-  const coreConditionsMet = rsiExtremeStrict && boundaryTouch && strongRejection;
+  // Opportunity-based gatekeeper: 60/100 qualifies a setup. RSI extremes are
+  // supporting evidence, NOT a mandatory gate. Conflicting critical evidence
+  // (trend fighting the direction, choppy market, messy formation) still waits.
   const requiredConfluence = MTG_REQUIRED_CONFLUENCE[mtg.level];
-  const gatePassed = coreConditionsMet && !choppy && cleanFormation && confidenceScore >= requiredConfluence;
-  const signal: SignalDirection = gatePassed ? dirBias ?? 'WAIT' : 'WAIT';
+  const scoreGate = confidenceScore >= requiredConfluence;
+  const conflictAgainst = dirBias !== null && (
+    (dirBias === 'CALL' && trendFilter === 'BEARISH' && rsiSupportsPut) ||
+    (dirBias === 'PUT' && trendFilter === 'BULLISH' && rsiSupportsCall));
+  const gatePassed = dirBias !== null && scoreGate && !choppy && cleanFormation && !conflictAgainst;
+  const signal: SignalDirection = gatePassed ? dirBias : 'WAIT';
+
+  // Exact, actionable WAIT explanation for every non-signal decision.
+  const waitExplanation = ((): SetupAssessment['wait'] => {
+    if (gatePassed) return undefined;
+    if (dirBias === null) return {
+      blockingCondition: 'No directional bias from evidence.',
+      missingData: 'No aligned rejection wick, RSI lean, or Bollinger edge position.',
+      requiredConfirmation: 'A decisive candle body/rejection or RSI/band lean toward one side.',
+      category: 'STRATEGY' as const,
+    };
+    if (confidenceScore < requiredConfluence) return {
+      blockingCondition: `Confluence ${confidenceScore}% below required ${requiredConfluence}%.`,
+      missingData: `Need ~${requiredConfluence - confidenceScore} more aligned-evidence points.`,
+      requiredConfirmation: 'Additional independent confirmation (trend alignment, EMA alignment, or indicator support).',
+      category: 'STRATEGY' as const,
+    };
+    if (conflictAgainst) return {
+      blockingCondition: 'Critical evidence conflict: trend and momentum oppose the directional bias.',
+      missingData: 'Resolution of trend-vs-setup conflict.',
+      requiredConfirmation: 'Trend turn or momentum exhaustion confirming the counter-trend setup.',
+      category: 'CONFLICT' as const,
+    };
+    if (!cleanFormation) return {
+      blockingCondition: 'Messy candle formation (doji / spinning-top geometry).',
+      missingData: 'A decisive candle body or prominent rejection wick.',
+      requiredConfirmation: 'Next candle closing with a clear body (>30% of range) or strong rejection.',
+      category: 'CANDLE_EXTRACTION' as const,
+    };
+    return {
+      blockingCondition: 'Choppy market conditions.',
+      missingData: 'Band expansion or directional body candles.',
+      requiredConfirmation: 'Breakout from the squeeze with a directional body candle.',
+      category: 'STRATEGY' as const,
+    };
+  })();
+  const classification = classifySetup(confidenceScore, independentEvidence);
   const gateFailureReason = gatePassed
     ? undefined
-    : !rsiExtremeStrict
-      ? `Gatekeeper: RSI ${rsi?.toFixed(1) ?? 'unavailable'} not in extreme zone (<25 oversold / >75 overbought).`
-      : !boundaryTouch
-        ? 'Gatekeeper: price has not touched or pierced the outer Bollinger Band.'
-        : !strongRejection
-          ? 'Gatekeeper: candle lacks a prominent body-to-wick rejection geometry.'
-          : !cleanFormation
-            ? 'Gatekeeper: messy/unclean candle formation (doji or spinning-top shape, no decisive body).'
-            : choppy
-              ? 'Gatekeeper: market is choppy (mid-band price, overlapping candles, or band squeeze).'
-              : `Gatekeeper: confluence ${confidenceScore}% below required ${requiredConfluence}% (MTG level ${mtg.level}).`;
+    : waitExplanation
+      ? `${waitExplanation.category}: ${waitExplanation.blockingCondition} → needs: ${waitExplanation.requiredConfirmation}`
+      : undefined;
+
+  const setup: SetupAssessment = { classification, independentEvidenceCount: independentEvidence, wait: waitExplanation };
 
   const expiry = decideExpiry({
     signal,
@@ -852,5 +950,6 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
     },
     reconstructedCandleCount: reconstruction?.candles.length ?? null,
     reconstructionQuality: reconstruction?.quality ?? null,
+    setup,
   };
 }

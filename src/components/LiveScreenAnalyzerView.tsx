@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, Camera, Square, Zap, AlertTriangle, Timer, Volume2, VolumeX } from 'lucide-react';
+import { Activity, Camera, Square, Zap, AlertTriangle, Timer, Volume2, VolumeX, ClipboardPaste, Image as ImageIcon } from 'lucide-react';
+import type { AlgoAnalysisResult as ShotAnalysisResult } from '../types';
 import type { AlgoAnalysisResult } from '../types';
 import { alertManager } from '../services/alertManager';
 import { detectChartIdentity, disposeOcr } from '../services/chartIdentityService';
@@ -246,7 +247,10 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     {flashNewCandle && result && result.signal !== 'WAIT' && (
       <div className={`mb-4 animate-pulse border-2 p-4 text-center text-lg font-black tracking-widest ${badgeTone}`}>⚡ NEW CANDLE OPEN — {badgeLabel} · {result.confidenceScore}% confluence · For Next Candle Expiry</div>
     )}
-    <div className="grid gap-5 lg:grid-cols-[1.25fr_.75fr]">
+    {/* LEFT: screenshot capture panel · RIGHT: live analysis — Part 14 requirement */}
+    <div className="grid gap-5 xl:grid-cols-[320px_1fr]">
+      <ScreenshotCapturePanel sharedStream={stream} sharedVideo={video} />
+    <div className="grid gap-5 lg:grid-cols-[1.25fr_.75fr] min-w-0">
       <div className="border border-slate-800 bg-slate-900/70 p-5"><div className="flex items-center justify-between border-b border-slate-800 pb-3"><span className="text-sm font-semibold">Chart frame input</span><span className="font-mono text-xs text-slate-400">{selectedSymbol} · {selectedTimeframe}{auto ? ' · continuous scan active' : ''}</span></div>
         <div className="relative mt-4 grid aspect-video place-items-center overflow-hidden border border-slate-800 bg-slate-950"><video ref={video} autoPlay muted className={active ? 'h-full w-full object-contain' : 'hidden'} />{!active && <div className="text-center text-slate-500"><Camera className="mx-auto mb-2 h-8 w-8" /><p className="text-sm">Optional local screen frame</p><p className="mt-1 text-xs">Pixels never leave this terminal.</p></div>}</div>
         <div className="mt-4 flex flex-wrap gap-3"><button onClick={active ? stop : start} className="flex items-center gap-2 border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium">{active ? <Square className="h-4 w-4" /> : <Camera className="h-4 w-4" />}{active ? 'Stop screen share' : 'Share chart screen'}</button>{lastCaptureAt && <span className="self-center font-mono text-xs text-emerald-400">Last frame captured {Math.round((Date.now() - lastCaptureAt) / 1000)}s ago</span>}</div>
@@ -256,7 +260,7 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
           <div className="text-3xl font-black tracking-[.12em]">{badgeLabel}</div>
           <div className="mt-2 font-mono text-sm">{result ? `${result.confidenceScore}% confluence` : 'Awaiting analysis'}</div>
           <div className="mt-1 font-mono text-xs">{result ? `Recommended expiry: ${result.expiry.label} (${result.expiry.candles > 0 ? `${result.expiry.candles} candle${result.expiry.candles > 1 ? 's' : ''}` : 'stand aside'})` : ''}</div>
-          {result && <div className="mt-1 font-mono text-[11px] opacity-75">Sureshot gate: {result.confidenceScore >= 80 ? '✓' : '✗'} 80%+ required (MTG req: {result.mtg.requiredConfluence}%)</div>}
+          {result && <div className="mt-1 font-mono text-[11px] opacity-75">Opportunity gate: {result.confidenceScore >= 60 ? '✓' : '✗'} 60/100 required · {result.setup.classification} (MTG req: {result.mtg.requiredConfluence}%)</div>}
         </div>
         {result && (
           <div className={`mt-3 border p-3 text-xs ${result.mtg.level !== 'BASE' ? 'border-amber-400/40 bg-amber-400/10 text-amber-200' : 'border-slate-700 bg-slate-950 text-slate-400'}`}>
@@ -282,15 +286,18 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
         )}
       </div>
     </div>
+    </div>
     {error && <p className="mt-4 border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200">{error}</p>}
     {result && <article className="mt-5 border-l-2 border-cyan-400 bg-slate-900/70 p-5"><div className="flex items-center gap-2 text-sm font-semibold"><Activity className="h-4 w-4 text-cyan-300" />Strict mathematical reasoning · confluence breakdown</div>
       <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-mono">
-        <span className={`border px-2 py-1 ${result.confluence.rsiExtreme ? 'border-emerald-400 text-emerald-300' : 'border-slate-700 text-slate-500'}`}>RSI extreme (&lt;25 / &gt;75): {result.confluence.rsiExtreme ? 'YES' : 'NO'}</span>
+        <span className={`border px-2 py-1 ${result.confluence.rsiExtreme ? 'border-emerald-400 text-emerald-300' : 'border-slate-700 text-slate-500'}`}>RSI extreme (supporting, not required): {result.confluence.rsiExtreme ? 'YES' : 'NO'}</span>
         <span className={`border px-2 py-1 ${result.confluence.bollingerBoundaryTouch ? 'border-emerald-400 text-emerald-300' : 'border-slate-700 text-slate-500'}`}>BB boundary touch: {result.confluence.bollingerBoundaryTouch ? 'YES' : 'NO'}</span>
         <span className={`border px-2 py-1 ${result.confluence.rejectionWickStrong ? 'border-emerald-400 text-emerald-300' : 'border-slate-700 text-slate-500'}`}>Strong rejection wick: {result.confluence.rejectionWickStrong ? 'YES' : 'NO'}</span>
         <span className={`border px-2 py-1 ${result.confluence.momentumAligned ? 'border-emerald-400 text-emerald-300' : 'border-slate-700 text-slate-500'}`}>Momentum aligned: {result.confluence.momentumAligned ? 'YES' : 'NO'}</span>
         <span className="border border-slate-700 px-2 py-1 text-slate-300">Weighted score: {result.confluence.score}%</span>
       </div>
+      <p className="mt-2 font-mono text-xs text-cyan-300">Setup classification: {result.setup.classification} · {result.setup.independentEvidenceCount} independent evidence sources</p>
+      {result.setup.wait && <p className="mt-2 border border-amber-400/40 bg-amber-400/10 p-2 text-xs text-amber-200">WAIT — {result.setup.wait.category}: {result.setup.wait.blockingCondition} Missing: {result.setup.wait.missingData} Would qualify with: {result.setup.wait.requiredConfirmation}</p>}
       <p className="mt-3 text-sm leading-6 text-slate-300">{result.reasoning || result.summaryReason}</p>
       <p className="mt-2 font-mono text-xs text-slate-400">{result.candleObservation}</p>
       <p className="mt-2 font-mono text-xs text-slate-500">{result.expiry.rationale}</p>
@@ -301,3 +308,98 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
   </section>;
 };
 const Metric = ({ label, value }: { label: string; value: string }) => <div className="bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">{label}</p><p className="mt-1 font-mono text-xs font-bold text-slate-200">{value}</p></div>;
+
+/**
+ * Left-side screenshot capture panel (Part 14). Captures the CURRENT frame from
+ * the active shared screen without stopping live monitoring, shows the exact
+ * captured image, and sends it to the Screenshot Lab pipeline for an
+ * independent analysis with the same deterministic engine.
+ */
+const ScreenshotCapturePanel: React.FC<{ sharedStream: React.RefObject<MediaStream | null>; sharedVideo: React.RefObject<HTMLVideoElement | null> }> = ({ sharedVideo }) => {
+  const shotCanvas = useRef<HTMLCanvasElement>(null);
+  const [shotUrl, setShotUrl] = useState<string | null>(null);
+  const [shotAt, setShotAt] = useState<number | null>(null);
+  const [sending, setSending] = useState(false);
+  const [sentNote, setSentNote] = useState('');
+  const [sendErr, setSendErr] = useState('');
+
+  const capture = useCallback((chartCrop: boolean) => {
+    const videoEl = sharedVideo.current;
+    if (!videoEl || videoEl.videoWidth === 0) { setSendErr('No active shared screen — start screen sharing first.'); return; }
+    const c = shotCanvas.current!;
+    const ctx = c.getContext('2d', { willReadFrequently: true })!;
+    c.width = 320; c.height = 180;
+    ctx.drawImage(videoEl, 0, 0, 320, 180);
+    const pixels = ctx.getImageData(0, 0, 320, 180).data;
+    const greenish = (i: number) => pixels[i + 1] > pixels[i] * 1.1 && pixels[i + 1] > pixels[i + 2] * 1.1;
+    const reddish = (i: number) => pixels[i] > pixels[i + 1] * 1.1 && pixels[i] > pixels[i + 2] * 1.1;
+    // 'Capture Current Chart': tightest crop containing candle-coloured pixels.
+    let x0 = 0, y0 = 0, x1 = c.width, y1 = c.height;
+    if (chartCrop) {
+      x0 = c.width; y0 = c.height; x1 = 0; y1 = 0;
+      for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
+        const i = (y * c.width + x) * 4;
+        if ((greenish(i) || reddish(i)) && Math.max(pixels[i], pixels[i + 1], pixels[i + 2]) > 60) {
+          if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+        }
+      }
+      if (x1 <= x0 || y1 <= y0) { x0 = 0; y0 = 0; x1 = c.width; y1 = c.height; }
+    }
+    const crop = document.createElement('canvas');
+    crop.width = Math.max(2, x1 - x0 + 1); crop.height = Math.max(2, y1 - y0 + 1);
+    crop.getContext('2d')!.drawImage(c, x0, y0, crop.width, crop.height, 0, 0, crop.width, crop.height);
+    if (shotUrl) URL.revokeObjectURL(shotUrl);
+    crop.toBlob((blob) => {
+      if (blob) setShotUrl(URL.createObjectURL(blob));
+    }, 'image/png');
+    setShotAt(Date.now());
+    setSendErr(''); setSentNote(chartCrop ? 'Chart region captured.' : 'Full frame captured.');
+  }, [sharedVideo]);
+
+  const sendToLab = useCallback(async () => {
+    if (!shotUrl) { setSendErr('Capture a screenshot first.'); return; }
+    setSending(true); setSendErr(''); setSentNote('');
+    try {
+      // Re-read the exact captured pixels from the stored image and run the
+      // independent screenshot analysis (same endpoint used by Screenshot Lab).
+      const img = new Image();
+      img.src = shotUrl;
+      await img.decode();
+      const W = 320, H = 180;
+      const c = document.createElement('canvas'); c.width = W; c.height = H;
+      const ctx = c.getContext('2d', { willReadFrequently: true })!;
+      ctx.drawImage(img, 0, 0, W, H);
+      const pixels = Array.from(ctx.getImageData(0, 0, W, H).data);
+      const res = await fetch('/api/analyze-algorithmic', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ frame: { width: W, height: H, pixels } }),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Screenshot analysis failed.');
+      const analysis = data.result as ShotAnalysisResult;
+      await fetch('/api/screenshots', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'LIVE_CAPTURE', width: img.naturalWidth || W, height: img.naturalHeight || H, result: analysis }),
+      });
+      setSentNote(`Independently analysed & saved (${analysis.signal} · ${analysis.confidenceScore}% · ${analysis.setup.classification}). Open the Screenshot Lab tab for the full result and history.`);
+    } catch (e) {
+      setSendErr(e instanceof Error ? e.message : 'Failed to send screenshot.');
+    } finally { setSending(false); }
+  }, [shotUrl]);
+
+  return <aside className="flex flex-col gap-3 self-start border border-slate-800 bg-slate-900/70 p-4">
+    <div className="flex items-center justify-between border-b border-slate-800 pb-2"><span className="flex items-center gap-2 text-sm font-semibold"><ClipboardPaste className="h-4 w-4 text-cyan-300" />Screenshot capture</span><span className="font-mono text-[10px] text-slate-500">Live-tab side panel</span></div>
+    <div className="flex flex-col gap-2">
+      <button onClick={() => capture(false)} className="flex items-center gap-2 border border-cyan-400/40 bg-cyan-400/10 px-3 py-2 text-sm font-semibold text-cyan-200"><Camera className="h-4 w-4" />Capture Current Screen</button>
+      <button onClick={() => capture(true)} className="flex items-center gap-2 border border-slate-700 bg-slate-800 px-3 py-2 text-sm font-semibold text-slate-200"><ImageIcon className="h-4 w-4" />Capture Current Chart</button>
+    </div>
+    <div className="grid aspect-video place-items-center overflow-hidden border border-slate-800 bg-slate-950">
+      {shotUrl ? <img src={shotUrl} alt="Captured screenshot" className="h-full w-full object-contain" /> : <p className="p-3 text-center text-xs text-slate-500">Captured screenshot appears here — the exact image sent to the lab.</p>}
+    </div>
+    {shotAt && <p className="font-mono text-[10px] text-emerald-400">Captured {new Date(shotAt).toLocaleTimeString()} — analysis runs independently on THIS image.</p>}
+    <button onClick={() => void sendToLab()} disabled={sending || !shotUrl} className="flex items-center gap-2 bg-cyan-400 px-3 py-2 text-sm font-bold text-slate-950 disabled:opacity-40"><Zap className="h-4 w-4" />{sending ? 'Sending…' : 'Send to Screenshot Analysis'}</button>
+    {sentNote && <p className="text-[11px] text-emerald-300">{sentNote}</p>}
+    {sendErr && <p className="text-[11px] text-rose-300">{sendErr}</p>}
+    <canvas ref={shotCanvas} className="hidden" />
+  </aside>;
+};

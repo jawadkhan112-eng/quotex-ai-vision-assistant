@@ -42,6 +42,7 @@ export interface AlgoAnalysisResult {
   reconstructedCandleCount?: number | null;
   reconstructionQuality?: string | null;
   chartDetection: { isChart: boolean; score: number; reason: string };
+  setup: { classification: 'HIGH-QUALITY' | 'QUALIFIED' | 'DEVELOPING'; independentEvidenceCount: number; wait?: { blockingCondition: string; missingData: string; requiredConfirmation: string; category: string } };
   pattern?: { pattern: string; implication: string; pressure: { buyers: number; sellers: number; dominant: string; strength: number }; description: string };
   nextCandlePrediction: { prediction: string; rationale: string };
 }

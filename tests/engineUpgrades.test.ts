@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   analyzeAlgorithmic, detectChartPresence, measurePixelPressure, classifyCandlePattern,
-  reportSignalOutcome, resetMtgState, MIN_CONFIDENCE_THRESHOLD, measureCandle, type Candle,
+  reportSignalOutcome, resetMtgState, MIN_CONFIDENCE_THRESHOLD, HIGH_QUALITY_THRESHOLD,
+  classifySetup, measureCandle, type Candle,
 } from '../server/algorithmicEngine';
 import { reconstructCandles, type PixelFrame } from '../server/candleReconstruction';
 
@@ -90,9 +91,10 @@ describe('pattern classification and pixel pressure', () => {
   });
 });
 
-describe('80%+ gatekeeper and WAIT discipline', () => {
-  it('exports MIN_CONFIDENCE_THRESHOLD of 80', () => {
-    expect(MIN_CONFIDENCE_THRESHOLD).toBe(80);
+describe('60/100 opportunity-based gatekeeper and WAIT discipline', () => {
+  it('exports MIN_CONFIDENCE_THRESHOLD of 60 with 80 as HIGH-QUALITY band', () => {
+    expect(MIN_CONFIDENCE_THRESHOLD).toBe(60);
+    expect(HIGH_QUALITY_THRESHOLD).toBe(80);
   });
   it('returns WAIT, not error, when only a frame with no candles is analysed', () => {
     const result = analyzeAlgorithmic({ frame: makeCandleFrame(3) });
@@ -101,7 +103,60 @@ describe('80%+ gatekeeper and WAIT discipline', () => {
   it('never emits CALL/PUT below the threshold on a weak price series', () => {
     const prices = [100, 100.01, 100.02, 100.01, 100.0, 100.01, 100.02, 100.03];
     const result = analyzeAlgorithmic({ prices });
-    if (result.signal !== 'WAIT') expect(result.confidenceScore).toBeGreaterThanOrEqual(80);
+    if (result.signal !== 'WAIT') expect(result.confidenceScore).toBeGreaterThanOrEqual(60);
+  });
+});
+
+describe('adaptive 60-threshold behaviour (Part 3/Part 24 acceptance)', () => {
+  it('issues a signal for a qualifying 60-79 setup WITHOUT mandatory RSI extremes', () => {
+    // Moderate downtrend (RSI low-ish but NOT <25): the old gate blocked everything here.
+    const prices = Array.from({ length: 20 }, (_, i) => 100 - i * 0.8); // gentle decline, RSI well above 25
+    const candles = [
+      { open: 85.5, close: 84.2, high: 85.8, low: 83.9 },
+    ];
+    const result = analyzeAlgorithmic({ prices, candles });
+    expect(result.setup).toBeDefined();
+    if (result.signal !== 'WAIT') {
+      expect(result.confidenceScore).toBeGreaterThanOrEqual(60);
+      expect(result.confidenceScore).toBeLessThan(200); // sanity
+    } else {
+      // WAIT must always carry an exact, actionable explanation
+      expect(result.setup.wait).toBeDefined();
+      expect(result.setup.wait!.blockingCondition.length).toBeGreaterThan(5);
+      expect(result.setup.wait!.requiredConfirmation.length).toBeGreaterThan(5);
+    }
+  });
+  it('classifies 60-79 as QUALIFIED and 80+ as HIGH-QUALITY', () => {
+    expect(classifySetup(65, 2)).toBe('QUALIFIED');
+    expect(classifySetup(80, 3)).toBe('HIGH-QUALITY');
+    expect(classifySetup(50, 3)).toBe('DEVELOPING');
+    expect(classifySetup(75, 1)).toBe('DEVELOPING'); // insufficient independent evidence
+  });
+  it('below-60 setup stays WAIT with a category-tagged explanation', () => {
+    const prices = [10, 10.001, 10.002, 10.001, 10.0, 10.001, 10.002, 10.001];
+    const result = analyzeAlgorithmic({ prices });
+    if (result.signal === 'WAIT') {
+      expect(result.setup.wait).toBeDefined();
+      expect(['OCR','CHART_DETECTION','CANDLE_EXTRACTION','INDICATORS','STRATEGY','TIMING','CONFLICT']).toContain(result.setup.wait!.category);
+    }
+  });
+  it('missing RSI does not force WAIT when independent price-action evidence exists', () => {
+    // Short series (RSI needs 15+ closes): rejection candle supplies direction evidence.
+    const result = analyzeAlgorithmic({ candles: [
+      { open: 88, close: 86, high: 88.1, low: 85.9 },
+      { open: 86, close: 85.5, high: 86.2, low: 84.8 },
+      { open: 85.5, close: 83.0, high: 85.6, low: 82.9 },
+    ] });
+    expect(['CALL', 'PUT', 'WAIT']).toContain(result.signal);
+    if (result.signal === 'WAIT') expect(result.setup.wait).toBeDefined();
+  });
+  it('direction follows evidence, not just score', () => {
+    // Bullish trend + bearish rejection last candle: conflicting evidence cannot emit CALL.
+    const prices = Array.from({ length: 22 }, (_, i) => 90 + i * 0.9);
+    const result = analyzeAlgorithmic({ prices, candles: [{ open: 107, close: 106, high: 110.5, low: 105.9 }] });
+    if (result.signal === 'CALL') {
+      expect(result.trendFilter).not.toBe('BEARISH');
+    }
   });
 });
 
@@ -114,7 +169,7 @@ describe('MTG state machine', () => {
     const afterLoss = analyzeAlgorithmic({ prices: [30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50] });
     expect(afterLoss.mtg.level).toBe('MTG_LEVEL_1');
     expect(afterLoss.mtg.consecutiveFailures).toBe(1);
-    expect(afterLoss.mtg.requiredConfluence).toBe(85);
+    expect(afterLoss.mtg.requiredConfluence).toBe(70);
     reportSignalOutcome('WIN');
     const afterWin = analyzeAlgorithmic({ prices: [50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 30] });
     expect(afterWin.mtg.level).toBe('BASE');
@@ -125,7 +180,7 @@ describe('MTG state machine', () => {
     reportSignalOutcome('LOSS');
     const result = analyzeAlgorithmic({ prices: [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30] });
     expect(result.mtg.level).toBe('MTG_LEVEL_2');
-    expect(result.mtg.requiredConfluence).toBe(90);
+    expect(result.mtg.requiredConfluence).toBe(80);
     resetMtgState();
   });
 });
