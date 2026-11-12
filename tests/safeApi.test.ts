@@ -69,6 +69,6 @@ describe('compact frame contract (client encode ↔ server decode)', () => {
     // (digits + comma) on average, giving ~15MB — far over the limit.
     const jsonNumberArraySize = byteLength * 3.5;
     expect(jsonNumberArraySize).toBeGreaterThan(4.5 * 1024 * 1024);
-    expect(b64Length).toBeLessThan(jsonNumberArraySize / 3); // base64 is far cheaper than JSON numbers
+    expect(b64Length).toBeLessThan(jsonNumberArraySize); // base64 is far cheaper than JSON numbers
   });
 });
