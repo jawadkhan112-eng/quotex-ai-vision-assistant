@@ -4,6 +4,7 @@ import type { AlgoAnalysisResult as ShotAnalysisResult } from '../types';
 import type { AlgoAnalysisResult } from '../types';
 import type { ProviderDecision } from '../../server/modules/signalProviderIntelligence';
 import { alertManager } from '../services/alertManager';
+import { safeFetchJson, encodeCanvasFrame } from '../services/safeFetch';
 import { detectChartIdentity, disposeOcr } from '../services/chartIdentityService';
 import { describeIdentityChange, type ChartIdentity } from '../../server/chartIdentity';
 
@@ -44,42 +45,12 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     if (active && video.current && stream.current) video.current.srcObject = stream.current;
   }, [active]);
 
-  const run = useCallback(async () => {
-    setWorking(true); setError('');
-    try {
-      let frame: { width: number; height: number; pixels: number[] } | undefined;
-      if (active && !paused && video.current && canvas.current && video.current.videoWidth > 0) {
-        const context = canvas.current.getContext('2d', { willReadFrequently: true });
-        canvas.current.width = CAPTURE_W; canvas.current.height = CAPTURE_H;
-        context?.drawImage(video.current, 0, 0, CAPTURE_W, CAPTURE_H);
-        frame = { width: CAPTURE_W, height: CAPTURE_H, pixels: Array.from(context?.getImageData(0, 0, CAPTURE_W, CAPTURE_H).data ?? []) };
-        setLastCaptureAt(Date.now());
-      }
-      // Real screen data only: without an active shared frame or user-supplied price
-      // series, analysis is refused rather than falling back to synthetic prices.
-      if (!frame) {
-        setError('No screen shared. Share your Quotex chart screen so analysis uses real chart pixels — synthetic price fallbacks are disabled.');
-        setWorking(false);
-        return;
-      }
-      const response = await fetch('/api/analyze-algorithmic', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ symbol: selectedSymbol, timeframe: selectedTimeframe, frame }) });
-      const data = await response.json();
-      if (!data.success) throw new Error(data.error);
-      setResult(data.result);
-      resultRef.current = data.result;
-      // Chain into the Signal Provider Intelligence engine using the real
-      // reconstructed candle geometry — a decision for EVERY analysis pass.
-      void runDecision(data.result);
-    } catch (caught) { setError(caught instanceof Error ? caught.message : 'Local analysis failed.'); }
-    finally { setWorking(false); }
-  }, [active, paused, selectedSymbol, selectedTimeframe]);
-
   const runDecision = useCallback(async (analysis: AlgoAnalysisResult) => {
     const reconstructed = (analysis as { reconstructedCandles?: Array<{ open: number; high: number; low: number; close: number; quality?: number }> }).reconstructedCandles ?? [];
     if (reconstructed.length < 3) { setDecision(null); return; }
     setDecisionBusy(true);
     try {
-      const res = await fetch('/api/provider-analysis', {
+      const res = await safeFetchJson<{ success: boolean; decision?: ProviderDecision; meta?: Record<string, unknown>; error?: string }>('/api/provider-analysis', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           completed: reconstructed.map((c) => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
@@ -90,18 +61,49 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
           source: 'LIVE',
         }),
       });
-      const data = await res.json();
-      if (data.success) {
-        setDecision(data.decision);
-        // Persist with dedup (asset|market|timeframe|window|version) — one decision per analysis context.
-        void fetch('/api/decisions', {
+      if (res.ok && res.data?.success && res.data.decision) {
+        setDecision(res.data.decision);
+        // Persist with dedup (asset|market|timeframe|targetCandle|version) — one decision per analysis context.
+        void safeFetchJson('/api/decisions', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ decision: data.decision, meta: { ...data.meta, targetCandle: Date.now() } }),
+          body: JSON.stringify({ decision: res.data.decision, meta: { ...res.data.meta, targetCandle: Date.now() } }),
         });
       }
     } catch { /* decision is supplementary; analysis result remains authoritative */ }
     finally { setDecisionBusy(false); }
   }, [identity]);
+
+  const run = useCallback(async () => {
+    setWorking(true); setError('');
+    try {
+      let frame: { width: number; height: number; pixelsBase64: string } | undefined;
+      if (active && !paused && video.current && canvas.current && video.current.videoWidth > 0) {
+        const context = canvas.current.getContext('2d', { willReadFrequently: true });
+        canvas.current.width = CAPTURE_W; canvas.current.height = CAPTURE_H;
+        context?.drawImage(video.current, 0, 0, CAPTURE_W, CAPTURE_H);
+        frame = encodeCanvasFrame(canvas.current); // compact base64 — ~2.7MB, under the Vercel 413 limit
+        setLastCaptureAt(Date.now());
+      }
+      // Real screen data only: without an active shared frame or user-supplied price
+      // series, analysis is refused rather than falling back to synthetic prices.
+      if (!frame) {
+        setError('No screen shared. Share your Quotex chart screen so analysis uses real chart pixels — synthetic price fallbacks are disabled.');
+        setWorking(false);
+        return;
+      }
+      const response = await safeFetchJson<{ success: boolean; result?: AlgoAnalysisResult; error?: string }>('/api/analyze-algorithmic', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ symbol: selectedSymbol, timeframe: selectedTimeframe, frame }) });
+      if (!response.ok || !response.data?.success) {
+        throw new Error(response.error ?? 'Analysis request failed.');
+      }
+      const data = response.data;
+      setResult(data.result!);
+      resultRef.current = data.result!;
+      // Chain into the Signal Provider Intelligence engine using the real
+      // reconstructed candle geometry — a decision for EVERY analysis pass.
+      void runDecision(data.result!);
+    } catch (caught) { setError(caught instanceof Error ? caught.message : 'Local analysis failed.'); }
+    finally { setWorking(false); }
+  }, [active, paused, selectedSymbol, selectedTimeframe, runDecision]);
 
   // Chart identity detection: throttled OCR pass on the shared frame. Runs only
   // when a canvas frame exists; identity change invalidates the locked signal.
@@ -433,19 +435,20 @@ const ScreenshotCapturePanel: React.FC<{ sharedStream: React.RefObject<MediaStre
       const img = new Image();
       img.src = shotUrl;
       await img.decode();
-      const W = 320, H = 180;
+      // Bounded capture area keeps the base64 payload under the Vercel request limit.
+      const W = Math.min(1150, Math.max(320, img.naturalWidth || 960));
+      const H = Math.min(650, Math.max(180, Math.round((img.naturalHeight / Math.max(img.naturalWidth, 1)) * W)));
       const c = document.createElement('canvas'); c.width = W; c.height = H;
       const ctx = c.getContext('2d', { willReadFrequently: true })!;
       ctx.drawImage(img, 0, 0, W, H);
-      const pixels = Array.from(ctx.getImageData(0, 0, W, H).data);
-      const res = await fetch('/api/analyze-algorithmic', {
+      const frame = encodeCanvasFrame(c);
+      const res = await safeFetchJson<{ success: boolean; result?: ShotAnalysisResult; error?: string }>('/api/analyze-algorithmic', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ frame: { width: W, height: H, pixels } }),
+        body: JSON.stringify({ frame }),
       });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Screenshot analysis failed.');
-      const analysis = data.result as ShotAnalysisResult;
-      await fetch('/api/screenshots', {
+      if (!res.ok || !res.data?.success) throw new Error(res.error || 'Screenshot analysis failed.');
+      const analysis = res.data.result as ShotAnalysisResult;
+      await safeFetchJson('/api/screenshots', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source: 'LIVE_CAPTURE', width: img.naturalWidth || W, height: img.naturalHeight || H, result: analysis }),
       });

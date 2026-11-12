@@ -13,8 +13,28 @@ app.use(cors()); app.use(express.json({ limit: '8mb' }));
 
 app.get('/api/health', (_req, res) => res.json({ status: 'OK', app: 'Quotex Algorithmic Trading Terminal', version: '3.0.0', mode: 'LOCAL_ALGORITHMIC_ANALYSIS', environment: isVercel ? 'vercel-serverless' : 'standalone-node', externalApiCalls: false, timestamp: new Date().toISOString() }));
 
+/**
+ * Decode a compact base64 RGBA frame (client encoding keeps payloads under the
+ * ~4.5MB Vercel request limit) into the {width,height,pixels:number[]} shape
+ * the analysis engine expects. Legacy JSON number-array frames still accepted.
+ */
+function decodeFrame(raw: any): { width: number; height: number; pixels: number[] } | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const width = Number(raw.width), height = Number(raw.height);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) return undefined;
+  if (typeof raw.pixelsBase64 === 'string' && raw.pixelsBase64.length > 0) {
+    const buf = Buffer.from(raw.pixelsBase64, 'base64');
+    const expected = width * height * 4;
+    if (buf.length < expected) return undefined;
+    return { width, height, pixels: Array.from(buf.subarray(0, expected)) };
+  }
+  if (Array.isArray(raw.pixels)) return { width, height, pixels: raw.pixels };
+  return undefined;
+}
+
 app.post('/api/analyze-algorithmic', (req, res) => {
-  const { prices, candles, timeframe = '1M', frame } = req.body || {};
+  const { prices, candles, timeframe = '1M' } = req.body || {};
+  const frame = decodeFrame(req.body?.frame);
   if ((!Array.isArray(prices) || prices.length < 2) && !frame) return res.status(400).json({ success: false, error: 'Provide at least two finite closing prices or a chart frame.' });
   try {
     const result = analyzeAlgorithmic({ prices: Array.isArray(prices) ? prices : [], candles: Array.isArray(candles) ? candles : undefined, timeframe, frame });
