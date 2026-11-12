@@ -120,6 +120,31 @@ export function initDb() {
       notes TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS candle_decisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      decision_id TEXT UNIQUE NOT NULL,
+      created_at TEXT NOT NULL,
+      asset TEXT NOT NULL,
+      market_type TEXT NOT NULL,
+      timeframe TEXT NOT NULL,
+      target_candle TEXT NOT NULL,
+      prediction TEXT NOT NULL,
+      prediction_confidence INTEGER NOT NULL,
+      confluence_score INTEGER NOT NULL,
+      classification TEXT NOT NULL,
+      qualified INTEGER NOT NULL,
+      pattern TEXT,
+      trend TEXT,
+      explanation TEXT,
+      wait_reason TEXT,
+      data_quality TEXT,
+      candles_analyzed INTEGER,
+      source TEXT NOT NULL,
+      outcome TEXT DEFAULT 'PENDING',
+      analysis_version TEXT,
+      dedup_key TEXT UNIQUE NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS screenshot_analyses (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       created_at TEXT NOT NULL,

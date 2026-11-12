@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import crypto from 'crypto';
 import { db } from './server/db.js';
 import { analyzeAlgorithmic, reportSignalOutcome, resetMtgState } from './server/algorithmicEngine.js';
+import { analyzeProviderCandles, PROVIDER_ENGINE_VERSION, type ProviderCandle } from './server/modules/signalProviderIntelligence.js';
 
 dotenv.config();
 const app = express(); const PORT = process.env.PORT || 3000; const isVercel = Boolean(process.env.VERCEL);
@@ -20,6 +21,56 @@ app.post('/api/analyze-algorithmic', (req, res) => {
     try { db.prepare('INSERT INTO analysis_history (timestamp, symbol, timeframe, signal, evidence_score, chart_readable, candle_observation, reasons) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(result.analysisTimestamp, req.body.symbol || 'Local chart', timeframe, result.signal, result.confidenceScore, 1, result.candleObservation, JSON.stringify([result.reasoning])); } catch { /* history is optional */ }
     res.json({ success: true, result, local: true });
   } catch (error: any) { res.status(400).json({ success: false, error: error.message || 'Algorithmic analysis failed.' }); }
+});
+
+/**
+ * Signal Provider Intelligence — candle-by-candle directional decision.
+ * Shared by LIVE and SCREENSHOT analysis (same engine, only input differs).
+ * Does NOT auto-persist a decision; persistence happens via /api/decisions so
+ * duplicate prevention and target-candle bookkeeping stay explicit.
+ */
+app.post('/api/provider-analysis', (req, res) => {
+  const { completed, developing, window, asset = 'UNKNOWN', marketType = 'UNKNOWN', timeframe = 'UNKNOWN', source = 'LIVE' } = req.body || {};
+  if (!Array.isArray(completed) || completed.length < 3) {
+    return res.status(400).json({ success: false, error: 'Provide at least 3 completed candles (open/high/low/close objects).' });
+  }
+  try {
+    const validCompleted = (completed as ProviderCandle[]).filter((c) =>
+      c && Number.isFinite(c.open) && Number.isFinite(c.high) && Number.isFinite(c.low) && Number.isFinite(c.close));
+    if (validCompleted.length < 3) return res.status(400).json({ success: false, error: 'Completed candles must contain finite open/high/low/close.' });
+    const decision = analyzeProviderCandles({ completed: validCompleted, developing, window: window === 10 ? 10 : 5 });
+    res.json({ success: true, decision, meta: { asset, marketType, timeframe, source, analysisVersion: PROVIDER_ENGINE_VERSION } });
+  } catch (error: any) { res.status(400).json({ success: false, error: error.message || 'Provider analysis failed.' }); }
+});
+
+// Persist a candle decision with duplicate prevention (one decision per asset+
+// market+timeframe+target candle+algorithm version).
+app.post('/api/decisions', (req, res) => {
+  const { decision, meta } = req.body || {};
+  if (!decision || !meta) return res.status(400).json({ success: false, error: 'Provide decision and meta.' });
+  const dedupKey = `${meta.asset}|${meta.marketType}|${meta.timeframe}|${meta.targetCandle ?? 'unknown'}|${decision.analysisVersion ?? PROVIDER_ENGINE_VERSION}`;
+  const decisionId = `DEC-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    db.prepare(`INSERT INTO candle_decisions (decision_id, created_at, asset, market_type, timeframe, target_candle, prediction, prediction_confidence, confluence_score, classification, qualified, pattern, trend, explanation, wait_reason, data_quality, candles_analyzed, source, outcome, analysis_version, dedup_key)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)`)
+      .run(decisionId, new Date().toISOString(), meta.asset ?? 'UNKNOWN', meta.marketType ?? 'UNKNOWN', meta.timeframe ?? 'UNKNOWN',
+        String(meta.targetCandle ?? 'unknown'), decision.prediction, decision.predictionConfidence ?? 0, decision.confluenceScore ?? 0,
+        decision.classification ?? 'LOW CONFIDENCE', decision.qualified ? 1 : 0, decision.patternName ?? null, decision.trend ?? null,
+        decision.explanation ?? null, decision.waitReason ?? null, decision.dataQuality ?? null, decision.candlesAnalyzed ?? null,
+        meta.source ?? 'LIVE', decision.analysisVersion ?? PROVIDER_ENGINE_VERSION, dedupKey);
+    res.json({ success: true, decisionId, duplicate: false });
+  } catch (error: any) {
+    if (String(error.message).includes('UNIQUE')) return res.json({ success: true, decisionId: null, duplicate: true });
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/decisions', (req, res) => {
+  try {
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+    const rows = db.prepare('SELECT * FROM candle_decisions ORDER BY id DESC LIMIT ?').all(limit);
+    res.json({ success: true, decisions: rows });
+  } catch (error: any) { res.status(500).json({ success: false, error: error.message }); }
 });
 
 // Martingale (MTG) tracking: report the WIN/LOSS outcome of the last signal so the

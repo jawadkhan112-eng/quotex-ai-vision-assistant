@@ -2,11 +2,18 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, Camera, Square, Zap, AlertTriangle, Timer, Volume2, VolumeX, ClipboardPaste, Image as ImageIcon } from 'lucide-react';
 import type { AlgoAnalysisResult as ShotAnalysisResult } from '../types';
 import type { AlgoAnalysisResult } from '../types';
+import type { ProviderDecision } from '../../server/modules/signalProviderIntelligence';
 import { alertManager } from '../services/alertManager';
 import { detectChartIdentity, disposeOcr } from '../services/chartIdentityService';
 import { describeIdentityChange, type ChartIdentity } from '../../server/chartIdentity';
 
 interface Props { selectedSymbol: string; selectedTimeframe: string; }
+
+/** Analysis capture resolution. Must stay high enough that real candles remain
+ * multi-pixel wide; 320x180 collapsed real candles into slivers and broke
+ * candle reconstruction (the original WAIT/zero-values root cause). */
+const CAPTURE_W = 960;
+const CAPTURE_H = 540;
 
 export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, selectedTimeframe }) => {
   const video = useRef<HTMLVideoElement>(null);
@@ -29,6 +36,9 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
   const [ocrBusy, setOcrBusy] = useState(false);
   const resultRef = useRef<AlgoAnalysisResult | null>(null);
   const startingRef = useRef(false); // duplicate-session guard
+  // Signal Provider Intelligence: candle-by-candle UP/DOWN/WAIT decision state.
+  const [decision, setDecision] = useState<ProviderDecision | null>(null);
+  const [decisionBusy, setDecisionBusy] = useState(false);
 
   useEffect(() => {
     if (active && video.current && stream.current) video.current.srcObject = stream.current;
@@ -40,9 +50,9 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
       let frame: { width: number; height: number; pixels: number[] } | undefined;
       if (active && !paused && video.current && canvas.current && video.current.videoWidth > 0) {
         const context = canvas.current.getContext('2d', { willReadFrequently: true });
-        canvas.current.width = 320; canvas.current.height = 180;
-        context?.drawImage(video.current, 0, 0, 320, 180);
-        frame = { width: 320, height: 180, pixels: Array.from(context?.getImageData(0, 0, 320, 180).data ?? []) };
+        canvas.current.width = CAPTURE_W; canvas.current.height = CAPTURE_H;
+        context?.drawImage(video.current, 0, 0, CAPTURE_W, CAPTURE_H);
+        frame = { width: CAPTURE_W, height: CAPTURE_H, pixels: Array.from(context?.getImageData(0, 0, CAPTURE_W, CAPTURE_H).data ?? []) };
         setLastCaptureAt(Date.now());
       }
       // Real screen data only: without an active shared frame or user-supplied price
@@ -57,9 +67,41 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
       if (!data.success) throw new Error(data.error);
       setResult(data.result);
       resultRef.current = data.result;
+      // Chain into the Signal Provider Intelligence engine using the real
+      // reconstructed candle geometry — a decision for EVERY analysis pass.
+      void runDecision(data.result);
     } catch (caught) { setError(caught instanceof Error ? caught.message : 'Local analysis failed.'); }
     finally { setWorking(false); }
   }, [active, paused, selectedSymbol, selectedTimeframe]);
+
+  const runDecision = useCallback(async (analysis: AlgoAnalysisResult) => {
+    const reconstructed = (analysis as { reconstructedCandles?: Array<{ open: number; high: number; low: number; close: number; quality?: number }> }).reconstructedCandles ?? [];
+    if (reconstructed.length < 3) { setDecision(null); return; }
+    setDecisionBusy(true);
+    try {
+      const res = await fetch('/api/provider-analysis', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          completed: reconstructed.map((c) => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
+          window: reconstructed.length >= 10 ? 10 : 5,
+          asset: identity?.pair.pair ?? analysis.detectedAsset ?? 'UNKNOWN',
+          marketType: identity?.marketType.marketType ?? 'UNKNOWN',
+          timeframe: identity?.timeframe.timeframe ?? analysis.detectedTimeframe ?? 'UNKNOWN',
+          source: 'LIVE',
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setDecision(data.decision);
+        // Persist with dedup (asset|market|timeframe|window|version) — one decision per analysis context.
+        void fetch('/api/decisions', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ decision: data.decision, meta: { ...data.meta, targetCandle: Date.now() } }),
+        });
+      }
+    } catch { /* decision is supplementary; analysis result remains authoritative */ }
+    finally { setDecisionBusy(false); }
+  }, [identity]);
 
   // Chart identity detection: throttled OCR pass on the shared frame. Runs only
   // when a canvas frame exists; identity change invalidates the locked signal.
@@ -94,8 +136,8 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     const ingest = () => {
       if (video.current && canvas.current && video.current.videoWidth > 0) {
         const context = canvas.current.getContext('2d', { willReadFrequently: true });
-        canvas.current.width = 320; canvas.current.height = 180;
-        context?.drawImage(video.current, 0, 0, 320, 180);
+        canvas.current.width = CAPTURE_W; canvas.current.height = CAPTURE_H;
+        context?.drawImage(video.current, 0, 0, CAPTURE_W, CAPTURE_H);
       }
     };
     ingest();
@@ -288,6 +330,32 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     </div>
     </div>
     {error && <p className="mt-4 border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200">{error}</p>}
+    {decision && <article className="mt-5 border-l-2 border-violet-400 bg-slate-900/70 p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-sm font-semibold"><Activity className="h-4 w-4 text-violet-300" />Signal Provider Intelligence — next-candle decision</div>
+        <span className="font-mono text-xs text-slate-500">{decision.candlesAnalyzed} completed candles · v{decision.analysisVersion}</span>
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-4">
+        <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Prediction</p><p className={`mt-1 font-mono text-xl font-black ${decision.prediction === 'UP' ? 'text-emerald-300' : decision.prediction === 'DOWN' ? 'text-rose-300' : 'text-amber-300'}`}>{decision.prediction}</p></div>
+        <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Prediction confidence</p><p className="mt-1 font-mono text-xl font-black">{decision.predictionConfidence}%</p></div>
+        <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Confluence</p><p className="mt-1 font-mono text-xl font-black">{decision.confluenceScore}/100</p></div>
+        <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Classification</p><p className="mt-1 font-mono text-sm font-bold text-slate-200">{decision.classification}{decision.qualified ? ' · QUALIFIED' : ''}</p></div>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-mono">
+        <span className="border border-emerald-400/40 px-2 py-1 text-emerald-300">Bullish {decision.bullishScore}</span>
+        <span className="border border-rose-400/40 px-2 py-1 text-rose-300">Bearish {decision.bearishScore}</span>
+        <span className="border border-slate-700 px-2 py-1 text-slate-300">Trend: {decision.trend}</span>
+        <span className="border border-slate-700 px-2 py-1 text-slate-300">Pattern: {decision.patternName.replace(/_/g, ' ').toLowerCase()}</span>
+        <span className="border border-slate-700 px-2 py-1 text-slate-300">Data quality: {decision.dataQuality}</span>
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-3 text-[11px]">
+        <div><p className="font-bold text-emerald-300">Supporting (UP)</p><ul className="mt-1 space-y-0.5 font-mono text-slate-400">{decision.bullishVotes.map((v) => <li key={v.strategy}>{v.strategy}: {v.evidence} ({v.strength})</li>)}</ul></div>
+        <div><p className="font-bold text-rose-300">Opposing (DOWN)</p><ul className="mt-1 space-y-0.5 font-mono text-slate-400">{decision.bearishVotes.map((v) => <li key={v.strategy}>↳ {v.evidence}</li>)}</ul></div>
+        <div><p className="font-bold text-slate-300">Neutral / indecisive</p><ul className="mt-1 space-y-0.5 font-mono text-slate-500">{decision.neutralVotes.map((v) => <li key={v.strategy}>{v.strategy}: {v.evidence}</li>)}</ul></div>
+      </div>
+      <p className="mt-3 text-sm leading-6 text-slate-300">{decision.explanation}</p>
+      {decision.waitReason && <p className="mt-2 border border-amber-400/40 bg-amber-400/10 p-2 text-xs text-amber-200">WAIT reason: {decision.waitReason}</p>}
+    </article>}
     {result && <article className="mt-5 border-l-2 border-cyan-400 bg-slate-900/70 p-5"><div className="flex items-center gap-2 text-sm font-semibold"><Activity className="h-4 w-4 text-cyan-300" />Strict mathematical reasoning · confluence breakdown</div>
       <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-mono">
         <span className={`border px-2 py-1 ${result.confluence.rsiExtreme ? 'border-emerald-400 text-emerald-300' : 'border-slate-700 text-slate-500'}`}>RSI extreme (supporting, not required): {result.confluence.rsiExtreme ? 'YES' : 'NO'}</span>

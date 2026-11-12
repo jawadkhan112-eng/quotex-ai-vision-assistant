@@ -48,10 +48,11 @@ export const ScreenshotLabView: React.FC = () => {
     try {
       const canvas = canvasRef.current!;
       const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-      const W = 320, H = 180;
-      canvas.width = W; canvas.height = H;
-      ctx.drawImage(image, 0, 0, W, H);
-      const pixels = Array.from(ctx.getImageData(0, 0, W, H).data);
+      // High-res capture so real candles survive reconstruction (parity with live mode).
+      const W = 960, H = Math.max(180, Math.round((image.naturalHeight / Math.max(image.naturalWidth, 1)) * 960) || 540);
+      canvas.width = W; canvas.height = Math.min(H, 1080);
+      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+      const pixels = Array.from(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
       // Independent identity detection on THIS exact screenshot.
       try {
         const detection = await detectChartIdentity(canvas, image.naturalWidth || canvas.width, image.naturalHeight || canvas.height);
@@ -60,7 +61,7 @@ export const ScreenshotLabView: React.FC = () => {
       const res = await fetch('/api/analyze-algorithmic', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ frame: { width: W, height: H, pixels } }),
+        body: JSON.stringify({ frame: { width: canvas.width, height: canvas.height, pixels } }),
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.error);

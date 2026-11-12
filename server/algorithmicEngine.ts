@@ -214,6 +214,9 @@ export interface AlgoAnalysisResult {
   reconstructedCandleCount?: number | null;
   /** Overall reconstruction quality band for the frame. */
   reconstructionQuality?: 'GOOD' | 'FAIR' | 'POOR' | null;
+  /** Explicit visual candle geometry (relative OHLC estimates) so callers can
+   * chain into the Signal Provider Intelligence engine without re-processing. */
+  reconstructedCandles?: ReconstructedCandle[];
   /** Smart screen-content validation: does the captured frame actually contain a trading chart? */
   chartDetection: {
     isChart: boolean;
@@ -950,6 +953,9 @@ export function analyzeAlgorithmic(input: AnalyzeInput): AlgoAnalysisResult {
     },
     reconstructedCandleCount: reconstruction?.candles.length ?? null,
     reconstructionQuality: reconstruction?.quality ?? null,
+    /** Explicit visual candle geometry (relative OHLC estimates) so callers can
+     * chain into the Signal Provider Intelligence engine without re-processing. */
+    reconstructedCandles: reconstruction?.candles ?? [],
     setup,
   };
 }
