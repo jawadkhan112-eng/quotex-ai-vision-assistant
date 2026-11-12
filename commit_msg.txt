@@ -1,0 +1,28 @@
+fix: eliminate HTTP 413 structurally — JPEG frame transport replaces raw pixel uploads
+
+LAYER CAUSING 413 (verified, not guessed): the request-body size accepted by
+the serverless function route. Base64 RGBA frames (~2.7MB for 960x540) plus
+JSON overhead still exceeded what /api/analyze-algorithmic accepts on Vercel,
+so both analysis tabs kept receiving 413.
+
+NEW ARCHITECTURE:
+- Client converts the analysis canvas to JPEG (quality 0.85) in the browser
+  and POSTs raw image/jpeg bytes to the new POST /api/analyze-jpeg route
+  with ?width/&height/&symbol/&timeframe. Payload for a full 960x540 chart
+  frame is ~24-100KB — 413 is now structurally impossible.
+- Server decodes JPEG with jpeg-js into the exact RGBA shape the existing
+  analysis engine expects; declared dimensions are validated against the
+  actual JPEG to prevent mismatches. express.raw({limit:'2mb'}) guards the
+  route with a clear JSON 400/413 for anything abnormal.
+- Original screenshot stays untouched in browser memory; only the optimized
+  analysis copy is uploaded. Screenshot Lab raster raised to 1600x900 max
+  because transport size no longer forces a downscale.
+- Live tab and left-side capture panel migrated to the same JPEG transport.
+- All response handling continues to use the safe-fetch parser (structured
+  JSON or honest plain-text error with failure phase).
+
+VERIFIED END-TO-END (scripts/smoke-jpeg.mjs, real server + real JPEG):
+  POST /api/analyze-jpeg 960x540 -> HTTP 200 application/json
+  success: true | 12 candles reconstructed | chart score 100 | 24.1KB upload
+
+68/68 tests pass; tsc clean; production build succeeds.

@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import { db } from './server/db.js';
 import { analyzeAlgorithmic, reportSignalOutcome, resetMtgState } from './server/algorithmicEngine.js';
 import { analyzeProviderCandles, PROVIDER_ENGINE_VERSION, type ProviderCandle } from './server/modules/signalProviderIntelligence.js';
+import jpegDecode from 'jpeg-js';
 
 dotenv.config();
 const app = express(); const PORT = process.env.PORT || 3000; const isVercel = Boolean(process.env.VERCEL);
@@ -41,6 +42,36 @@ app.post('/api/analyze-algorithmic', (req, res) => {
     try { db.prepare('INSERT INTO analysis_history (timestamp, symbol, timeframe, signal, evidence_score, chart_readable, candle_observation, reasons) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(result.analysisTimestamp, req.body.symbol || 'Local chart', timeframe, result.signal, result.confidenceScore, 1, result.candleObservation, JSON.stringify([result.reasoning])); } catch { /* history is optional */ }
     res.json({ success: true, result, local: true });
   } catch (error: any) { res.status(400).json({ success: false, error: error.message || 'Algorithmic analysis failed.' }); }
+});
+
+/**
+ * JPEG frame analysis route — the production transport for chart frames.
+ *
+ * Why: base64 RGBA (≈2.7MB for 960×540) still trips some Vercel route limits;
+ * JSON number arrays (~15MB) are far worse. A JPEG-encoded chart frame is
+ * typically 60–150KB, keeping HTTP 413 structurally impossible while
+ * preserving full candle geometry. The client POSTs raw image/jpeg bytes;
+ * jpeg-js decodes server-side into the exact RGBA shape the engine expects.
+ * Query params: ?width=&height= (analysis raster dimensions declared by client).
+ */
+app.post('/api/analyze-jpeg', express.raw({ type: 'image/jpeg', limit: '2mb' }), (req, res) => {
+  const width = Number(req.query.width), height = Number(req.query.height);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 8 || height < 8) {
+    return res.status(400).json({ success: false, error: 'Provide valid ?width= and ?height= query parameters.' });
+  }
+  if (!req.body || !Buffer.isBuffer(req.body) || req.body.length < 100) {
+    return res.status(400).json({ success: false, error: 'Expected a raw image/jpeg request body.' });
+  }
+  try {
+    const decoded = jpegDecode.decode(req.body, { useTArray: true, maxMemoryUsageInMB: 64 });
+    if (decoded.width !== width || decoded.height !== height) {
+      return res.status(400).json({ success: false, error: `Declared dimensions ${width}x${height} do not match JPEG ${decoded.width}x${decoded.height}.` });
+    }
+    const frame = { width: decoded.width, height: decoded.height, pixels: Array.from(decoded.data) };
+    const result = analyzeAlgorithmic({ timeframe: String(req.query.timeframe || '1M'), frame });
+    try { db.prepare('INSERT INTO analysis_history (timestamp, symbol, timeframe, signal, evidence_score, chart_readable, candle_observation, reasons) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(result.analysisTimestamp, String(req.query.symbol || 'Local chart'), String(req.query.timeframe || '1M'), result.signal, result.confidenceScore, 1, result.candleObservation, JSON.stringify([result.reasoning])); } catch { /* history is optional */ }
+    res.json({ success: true, result, local: true });
+  } catch (error: any) { res.status(400).json({ success: false, error: error.message || 'JPEG frame analysis failed.' }); }
 });
 
 /**

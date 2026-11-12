@@ -4,7 +4,7 @@ import type { AlgoAnalysisResult as ShotAnalysisResult } from '../types';
 import type { AlgoAnalysisResult } from '../types';
 import type { ProviderDecision } from '../../server/modules/signalProviderIntelligence';
 import { alertManager } from '../services/alertManager';
-import { safeFetchJson, encodeCanvasFrame } from '../services/safeFetch';
+import { safeFetchJson, analyzeFrameViaJpeg } from '../services/safeFetch';
 import { detectChartIdentity, disposeOcr } from '../services/chartIdentityService';
 import { describeIdentityChange, type ChartIdentity } from '../../server/chartIdentity';
 
@@ -76,22 +76,25 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
   const run = useCallback(async () => {
     setWorking(true); setError('');
     try {
-      let frame: { width: number; height: number; pixelsBase64: string } | undefined;
+      let analysisCanvas: HTMLCanvasElement | undefined;
       if (active && !paused && video.current && canvas.current && video.current.videoWidth > 0) {
         const context = canvas.current.getContext('2d', { willReadFrequently: true });
         canvas.current.width = CAPTURE_W; canvas.current.height = CAPTURE_H;
         context?.drawImage(video.current, 0, 0, CAPTURE_W, CAPTURE_H);
-        frame = encodeCanvasFrame(canvas.current); // compact base64 — ~2.7MB, under the Vercel 413 limit
+        analysisCanvas = canvas.current;
         setLastCaptureAt(Date.now());
       }
       // Real screen data only: without an active shared frame or user-supplied price
       // series, analysis is refused rather than falling back to synthetic prices.
-      if (!frame) {
+      if (!analysisCanvas) {
         setError('No screen shared. Share your Quotex chart screen so analysis uses real chart pixels — synthetic price fallbacks are disabled.');
         setWorking(false);
         return;
       }
-      const response = await safeFetchJson<{ success: boolean; result?: AlgoAnalysisResult; error?: string }>('/api/analyze-algorithmic', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ symbol: selectedSymbol, timeframe: selectedTimeframe, frame }) });
+      // JPEG transport: ~100KB payload instead of multi-MB JSON — the 413 fix.
+      const response = await analyzeFrameViaJpeg<{ success: boolean; result?: AlgoAnalysisResult; error?: string }>(analysisCanvas, {
+        symbol: selectedSymbol, timeframe: selectedTimeframe,
+      });
       if (!response.ok || !response.data?.success) {
         throw new Error(response.error ?? 'Analysis request failed.');
       }
@@ -435,17 +438,13 @@ const ScreenshotCapturePanel: React.FC<{ sharedStream: React.RefObject<MediaStre
       const img = new Image();
       img.src = shotUrl;
       await img.decode();
-      // Bounded capture area keeps the base64 payload under the Vercel request limit.
-      const W = Math.min(1150, Math.max(320, img.naturalWidth || 960));
-      const H = Math.min(650, Math.max(180, Math.round((img.naturalHeight / Math.max(img.naturalWidth, 1)) * W)));
+      // High-res analysis copy; JPEG transport keeps the upload ~100–200KB.
+      const W = Math.min(1600, Math.max(320, img.naturalWidth || 960));
+      const H = Math.min(900, Math.max(180, Math.round((img.naturalHeight / Math.max(img.naturalWidth, 1)) * W)));
       const c = document.createElement('canvas'); c.width = W; c.height = H;
       const ctx = c.getContext('2d', { willReadFrequently: true })!;
       ctx.drawImage(img, 0, 0, W, H);
-      const frame = encodeCanvasFrame(c);
-      const res = await safeFetchJson<{ success: boolean; result?: ShotAnalysisResult; error?: string }>('/api/analyze-algorithmic', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ frame }),
-      });
+      const res = await analyzeFrameViaJpeg<{ success: boolean; result?: ShotAnalysisResult; error?: string }>(c, { timeframe: '1M' });
       if (!res.ok || !res.data?.success) throw new Error(res.error || 'Screenshot analysis failed.');
       const analysis = res.data.result as ShotAnalysisResult;
       await safeFetchJson('/api/screenshots', {

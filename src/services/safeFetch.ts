@@ -100,25 +100,53 @@ export async function safeFetchJson<T = any>(
 
 /* ------------------- compact frame encoding ------------------- */
 
-export interface CompactFrame {
-  width: number;
-  height: number;
-  /** base64 of the raw RGBA bytes (~33% overhead vs 15MB+ for JSON number arrays). */
-  pixelsBase64: string;
+/**
+ * Convert an analysis canvas to a JPEG blob (quality 0.85) for transport.
+ * The server decodes it back to RGBA pixels. A 960×540 chart frame becomes
+ * roughly 60–150KB — versus ~15MB as JSON numbers and ~2.7MB as base64 RGBA.
+ * JPEG preserves candle body/wick geometry faithfully at chart scales.
+ */
+export function canvasToJpegBlob(canvas: HTMLCanvasElement, quality = 0.85): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => (blob ? resolve(blob) : reject(new Error('Canvas JPEG encoding failed.'))),
+      'image/jpeg',
+      quality
+    );
+  });
+}
+
+/** Size-guard helper: converts bytes to a readable KB/MB string for diagnostics. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
 /**
- * Encode a canvas frame as base64 RGBA. A 960×540 frame becomes ~2.7MB —
- * safely under the ~4.5MB Vercel request limit, versus ~15MB as JSON numbers.
+ * Preferred transport: POST the chart frame as raw JPEG bytes to
+ * /api/analyze-jpeg. Payload is typically 60–150KB (vs ~2.7MB base64 RGBA or
+ * ~15MB JSON numbers), keeping Vercel's HTTP 413 structurally impossible.
+ * Falls back to the legacy JSON route ONLY if the JPEG route is unavailable.
  */
-export function encodeCanvasFrame(canvas: HTMLCanvasElement): CompactFrame {
-  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-  const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  // Convert Uint8ClampedArray → base64 without spread (avoids call-stack limits).
-  let binary = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < data.length; i += chunk) {
-    binary += String.fromCharCode.apply(null, Array.from(data.subarray(i, i + chunk)) as unknown as number[]);
+export async function analyzeFrameViaJpeg<T = any>(
+  canvas: HTMLCanvasElement,
+  opts: { symbol?: string; timeframe?: string; quality?: number; timeoutMs?: number } = {}
+): Promise<SafeFetchResult<T>> {
+  const quality = opts.quality ?? 0.85;
+  let blob: Blob;
+  try {
+    blob = await canvasToJpegBlob(canvas, quality);
+  } catch (e: any) {
+    return { ok: false, status: 0, contentType: '', responseType: 'EMPTY', data: null, rawText: '', error: e?.message ?? 'JPEG encode failed.', failurePhase: 'UPLOAD' };
   }
-  return { width: canvas.width, height: canvas.height, pixelsBase64: btoa(binary) };
+  const params = new URLSearchParams({ width: String(canvas.width), height: String(canvas.height) });
+  if (opts.symbol) params.set('symbol', opts.symbol);
+  if (opts.timeframe) params.set('timeframe', opts.timeframe);
+  return safeFetchJson<T>(`/api/analyze-jpeg?${params.toString()}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'image/jpeg' },
+    body: blob,
+    timeoutMs: opts.timeoutMs ?? 30000,
+  });
 }

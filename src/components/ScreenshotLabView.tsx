@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Upload, Camera, Eye, Trash2, Image as ImageIcon } from 'lucide-react';
 import type { AlgoAnalysisResult } from '../types';
 import { detectChartIdentity } from '../services/chartIdentityService';
-import { safeFetchJson } from '../services/safeFetch';
+import { safeFetchJson, analyzeFrameViaJpeg } from '../services/safeFetch';
 import { type ChartIdentity } from '../../server/chartIdentity';
 
 interface ScreenshotRow {
@@ -49,10 +49,10 @@ export const ScreenshotLabView: React.FC = () => {
     try {
       const canvas = canvasRef.current!;
       const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-      // High-res capture sized to stay under the Vercel 4.5MB request limit as
-      // base64 RGBA: max usable area ≈ 1150×650. Cap width accordingly.
-      const W = Math.min(1150, Math.max(320, image.naturalWidth || 960));
-      const H = Math.min(650, Math.max(180, Math.round((image.naturalHeight / Math.max(image.naturalWidth, 1)) * W)));
+      // High-res analysis copy: cap the raster at 1600×900 — candles stay sharp,
+      // and the JPEG transport keeps the upload ~100–200KB regardless.
+      const W = Math.min(1600, Math.max(320, image.naturalWidth || 960));
+      const H = Math.min(900, Math.max(180, Math.round((image.naturalHeight / Math.max(image.naturalWidth, 1)) * W)));
       canvas.width = W; canvas.height = H;
       ctx.drawImage(image, 0, 0, W, H);
       // Independent identity detection on THIS exact screenshot.
@@ -60,16 +60,8 @@ export const ScreenshotLabView: React.FC = () => {
         const detection = await detectChartIdentity(canvas, image.naturalWidth || canvas.width, image.naturalHeight || canvas.height);
         setShotIdentity(detection.identity);
       } catch { setShotIdentity(null); }
-      const pixels = Array.from(ctx.getImageData(0, 0, W, H).data);
-      // Compact base64 encoding (legacy JSON array fallback kept server-side).
-      let binary = '';
-      const chunk = 0x8000;
-      for (let i = 0; i < pixels.length; i += chunk) binary += String.fromCharCode.apply(null, pixels.slice(i, i + chunk));
-      const res = await safeFetchJson<{ success: boolean; result?: AlgoAnalysisResult; error?: string }>('/api/analyze-algorithmic', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ frame: { width: W, height: H, pixelsBase64: btoa(binary) } }),
-      });
+      // JPEG transport (raw bytes, ~100–200KB) — the structural 413 fix.
+      const res = await analyzeFrameViaJpeg<{ success: boolean; result?: AlgoAnalysisResult; error?: string }>(canvas, { timeframe: '1M' });
       if (!res.ok || !res.data?.success) throw new Error(res.error ?? 'Screenshot analysis failed.');
       const analysis = res.data.result as AlgoAnalysisResult;
       setResult(analysis);
