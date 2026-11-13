@@ -6,6 +6,7 @@ import type { ProviderDecision } from '../../server/modules/signalProviderIntell
 import type { UnifiedDecision } from '../../server/unifiedDecisionEngine';
 import { alertManager } from '../services/alertManager';
 import { safeFetchJson, analyzeFrameViaJpeg } from '../services/safeFetch';
+import { createFrameQualityTracker, type FrameQualityTracker } from '../services/frameQuality';
 import { detectChartIdentity, disposeOcr } from '../services/chartIdentityService';
 import { describeIdentityChange, type ChartIdentity } from '../../server/chartIdentity';
 
@@ -68,6 +69,9 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manual
   }, []);
 
   // Honest status resolution: fresh frames arriving = RUNNING; stale = NO FRESH FRAME.
+  // Recovery is automatic: when a fresh frame arrives, the ingest loop updates
+  // lastCaptureAt and this effect flips NO_FRESH_FRAME back to RUNNING with no
+  // new session and no duplicate capture streams.
   useEffect(() => {
     if (!active) { setStatus(auto ? 'STOPPED' : 'IDLE'); return; }
     if (paused) { setStatus('PAUSED'); return; }
@@ -139,19 +143,31 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manual
     setWorking(true); setError('');
     try {
       let analysisCanvas: HTMLCanvasElement | undefined;
+      let staleAnalysis = false;
       if (active && !paused && video.current && canvas.current && video.current.videoWidth > 0) {
-        const context = canvas.current.getContext('2d', { willReadFrequently: true });
-        canvas.current.width = CAPTURE_W; canvas.current.height = CAPTURE_H;
-        context?.drawImage(video.current, 0, 0, CAPTURE_W, CAPTURE_H);
-        analysisCanvas = canvas.current;
-        setLastCaptureAt(Date.now());
-        setFramesCaptured((f) => f + 1);
-        setCaptureResolution(`${video.current.videoWidth}×${video.current.videoHeight} → ${CAPTURE_W}×${CAPTURE_H}`);
+        // Block analysis when the tracked stream is frozen or the last valid frame is stale —
+        // a stale frame must NEVER generate a fresh trading signal.
+        const frozen = frameQuality.current?.snapshot().streamFrozen ?? false;
+        const lastValid = frameQuality.current?.snapshot().lastFrameAt ?? null;
+        if (frozen || (lastValid !== null && Date.now() - lastValid > FRESH_FRAME_LIMIT_MS)) {
+          staleAnalysis = true;
+        }
+        if (!staleAnalysis) {
+          const context = canvas.current.getContext('2d', { willReadFrequently: true });
+          canvas.current.width = CAPTURE_W; canvas.current.height = CAPTURE_H;
+          context?.drawImage(video.current, 0, 0, CAPTURE_W, CAPTURE_H);
+          analysisCanvas = canvas.current;
+          setFramesCaptured((f) => f + 1);
+          setCaptureResolution(`${video.current.videoWidth}×${video.current.videoHeight} → ${CAPTURE_W}×${CAPTURE_H}`);
+        }
       }
       // Real screen data only: without an active shared frame or user-supplied price
       // series, analysis is refused rather than falling back to synthetic prices.
       if (!analysisCanvas) {
-        setError('No screen shared. Share your Quotex chart screen so analysis uses real chart pixels — synthetic price fallbacks are disabled.');
+        setError(staleAnalysis
+          ? 'Frame is stale or the shared stream is frozen — analysis halted until a new valid frame arrives. The existing decision is marked STALE.'
+          : 'No screen shared. Share your Quotex chart screen so analysis uses real chart pixels — synthetic price fallbacks are disabled.');
+        if (staleAnalysis) setResult((prev) => prev ? { ...prev, timingStatus: 'UNVERIFIED', summaryReason: 'STALE — no fresh frame' } : prev);
         setWorking(false);
         return;
       }
@@ -201,15 +217,33 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manual
     return () => { window.clearInterval(timer); void disposeOcr(); };
   }, [active]);
 
-  // Continuous background frame ingestion: lightweight polling captures new frames constantly.
+  // Continuous background frame ingestion: latest-frame-wins capture loop.
+  // THE STALE-FRAME ROOT CAUSE FIX: this loop (500ms cadence) is now the source
+  // of lastCaptureAt — previously only the once-per-minute analysis updated it,
+  // so the freshness check saw >5s-old frames ~95% of the time and showed
+  // NO FRESH FRAME even while the stream was healthy.
+  const frameQuality = useRef<FrameQualityTracker | null>(null);
+  const [frameNote, setFrameNote] = useState<string | null>(null);
   useEffect(() => {
     if (!auto || !active || paused) return;
+    if (!frameQuality.current) frameQuality.current = createFrameQualityTracker(FRESH_FRAME_LIMIT_MS);
+    const sigCanvas = document.createElement('canvas'); // 64x36 signature sampler
+    sigCanvas.width = 64; sigCanvas.height = 36;
+    const sigCtx = sigCanvas.getContext('2d', { willReadFrequently: true })!;
     const ingest = () => {
-      if (video.current && canvas.current && video.current.videoWidth > 0) {
-        const context = canvas.current.getContext('2d', { willReadFrequently: true });
-        canvas.current.width = CAPTURE_W; canvas.current.height = CAPTURE_H;
-        context?.drawImage(video.current, 0, 0, CAPTURE_W, CAPTURE_H);
-      }
+      if (!video.current || !canvas.current || video.current.videoWidth === 0) return;
+      // Latest-frame-wins: always draw the newest video frame onto the shared analysis canvas.
+      const context = canvas.current.getContext('2d', { willReadFrequently: true });
+      canvas.current.width = CAPTURE_W; canvas.current.height = CAPTURE_H;
+      context?.drawImage(video.current, 0, 0, CAPTURE_W, CAPTURE_H);
+      // Cheap 64x36 signature for duplicate/frozen/blank detection.
+      sigCtx.drawImage(video.current, 0, 0, 64, 36);
+      const sig = sigCtx.getImageData(0, 0, 64, 36).data;
+      const check = frameQuality.current!.evaluate(sig);
+      setFrameNote(check.verdict === 'FRESH' ? null : check.note);
+      // A DUPLICATE frame still proves the stream is alive (timestamp advances);
+      // BLANK/FROZEN frames do NOT refresh freshness — they are not valid chart data.
+      if (check.verdict === 'FRESH' || check.verdict === 'DUPLICATE') setLastCaptureAt(Date.now());
     };
     ingest();
     const timer = window.setInterval(ingest, 500);
@@ -280,6 +314,7 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manual
     setActive(false); setAuto(false); setPaused(false); setLastCaptureAt(null);
     setIdentity(null); setIdentityChanges([]); setUnified(null); setDecision(null);
     setLockedSignal(null); setStatus('STOPPED');
+    frameQuality.current?.reset(); setFrameNote(null);
   }, []);
 
   /** One valid screen-sharing session; guards against overlapping streams. */
@@ -397,10 +432,10 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manual
             <span>Last frame: {lastCaptureAt ? new Date(lastCaptureAt).toLocaleTimeString() : '—'}</span>
             <span>Frame age: {frameAgeSeconds !== null ? `${frameAgeSeconds}s` : '—'}{frameAgeSeconds !== null && !frameFresh ? ' (STALE)' : ''}</span>
             <span>Capture resolution: {captureResolution ?? '—'}</span>
-            <span>Frames captured: {framesCaptured}</span>
-            <span>Processing: {working ? 'analyzing…' : decision || unified ? 'complete' : 'waiting for frames'}</span>
+            <span>Frames captured: {framesCaptured}{frameQuality.current ? ` · ${frameQuality.current.snapshot().duplicateFrames} duplicate · ${frameQuality.current.snapshot().blankFrames} blank` : ''}</span>
             <span>Status: <span className={statusTone[status]}>{statusLabel[status]}</span></span>
           </div>
+          {frameNote && <p className="mt-2 border border-amber-400/40 bg-amber-400/10 p-2 font-mono text-[11px] text-amber-200">{frameNote}</p>}
           <div className="mt-4 flex flex-wrap gap-3">
             <button onClick={active ? stop : () => void start()} className="flex items-center gap-2 border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium">{active ? <Square className="h-4 w-4" /> : <Camera className="h-4 w-4" />}{active ? 'Stop screen share' : 'Share chart screen'}</button>
             <button onClick={() => setPreviewZoom((z) => !z)} disabled={!active} className="flex items-center gap-2 border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium disabled:opacity-40"><Maximize2 className="h-4 w-4" />Fullscreen</button>

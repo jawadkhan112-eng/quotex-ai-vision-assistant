@@ -367,3 +367,80 @@ describe('configurable evidence weights', () => {
     expect(getEvidenceWeights().TREND).toBe(before.TREND);
   });
 });
+
+/* ============ FRAME QUALITY / STALE-FRAME PIPELINE ============ */
+
+describe('frame quality tracker (stale-frame correction)', async () => {
+  const { createFrameQualityTracker, FROZEN_DUPLICATE_THRESHOLD } = await import('../src/services/frameQuality');
+
+  const solidSig = (r: number, g: number, b: number) => {
+    const s = new Uint8ClampedArray(64 * 36 * 4);
+    for (let i = 0; i < s.length; i += 4) { s[i] = r; s[i + 1] = g; s[i + 2] = b; s[i + 3] = 255; }
+    return s;
+  };
+
+  it('accepts a first valid frame as FRESH', () => {
+    const t = createFrameQualityTracker(5000);
+    const check = t.evaluate(solidSig(40, 120, 60), 1_000_000);
+    expect(check.verdict).toBe('FRESH');
+    expect(t.snapshot().acceptedFrames).toBe(1);
+  });
+
+  it('flags blank/black frames and never refreshes freshness with them', () => {
+    const t = createFrameQualityTracker(5000);
+    t.evaluate(solidSig(40, 120, 60), 1_000_000);
+    const blank = t.evaluate(solidSig(0, 0, 0), 1_100_000);
+    expect(blank.verdict).toBe('BLANK');
+    expect(t.snapshot().blankFrames).toBe(1);
+    // lastFrameAt unchanged by blank frame
+    expect(t.snapshot().lastFrameAt).toBe(1_000_000);
+  });
+
+  it('marks duplicate frames but keeps the stream alive (timestamp advances)', () => {
+    const t = createFrameQualityTracker(5000);
+    t.evaluate(solidSig(40, 120, 60), 1_000_000);
+    const dup = t.evaluate(solidSig(40, 120, 60), 1_050_000);
+    expect(dup.verdict).toBe('DUPLICATE');
+    expect(t.snapshot().lastFrameAt).toBe(1_050_000); // stream is alive
+    expect(t.snapshot().streamFrozen).toBe(false);
+  });
+
+  it(`detects a frozen stream after ${FROZEN_DUPLICATE_THRESHOLD} consecutive identical frames`, () => {
+    const t = createFrameQualityTracker(5000);
+    const sig = solidSig(40, 120, 60);
+    t.evaluate(sig, 1_000_000);
+    let verdict = 'FRESH';
+    for (let i = 1; i <= FROZEN_DUPLICATE_THRESHOLD; i++) verdict = t.evaluate(sig, 1_000_000 + i * 500).verdict;
+    expect(verdict).toBe('FROZEN');
+    expect(t.snapshot().streamFrozen).toBe(true);
+  });
+
+  it('a changed chart recovers the frozen flag (real content resumed)', () => {
+    const t = createFrameQualityTracker(5000);
+    const sig = solidSig(40, 120, 60);
+    t.evaluate(sig, 1_000_000);
+    for (let i = 1; i <= FROZEN_DUPLICATE_THRESHOLD; i++) t.evaluate(sig, 1_000_000 + i * 500);
+    expect(t.snapshot().streamFrozen).toBe(true);
+    // Chart moved: new frame content
+    const fresh = t.evaluate(solidSig(200, 30, 40), 1_100_000);
+    expect(fresh.verdict).toBe('FRESH');
+    expect(t.snapshot().streamFrozen).toBe(false);
+  });
+
+  it('isFresh respects the age limit', () => {
+    const t = createFrameQualityTracker(5000);
+    t.evaluate(solidSig(40, 120, 60), 1_000_000);
+    expect(t.isFresh(1_004_000)).toBe(true);
+    expect(t.isFresh(1_006_000)).toBe(false);
+  });
+
+  it('reset clears all counters and freshness', () => {
+    const t = createFrameQualityTracker(5000);
+    t.evaluate(solidSig(40, 120, 60), 1_000_000);
+    t.reset();
+    const s = t.snapshot();
+    expect(s.totalFrames).toBe(0);
+    expect(s.lastFrameAt).toBeNull();
+    expect(t.isFresh(1_000_000)).toBe(false);
+  });
+});
