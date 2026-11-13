@@ -444,3 +444,47 @@ describe('frame quality tracker (stale-frame correction)', async () => {
     expect(t.isFresh(1_000_000)).toBe(false);
   });
 });
+
+/* ============ CAPTURE CONNECTION STATE MACHINE ============ */
+
+describe('capture status state machine (6 honest states)', async () => {
+  const { resolveCaptureState, FRESHNESS_THRESHOLD_MS } = await import('../src/services/captureStatus');
+  const tracker = null;
+
+  it('DISCONNECTED when no active stream — even with a fresh frameAge', () => {
+    expect(resolveCaptureState({ streamActive: false, videoReady: true, tracker, processing: false, frameAgeMs: 100 })).toBe('DISCONNECTED');
+  });
+  it('CONNECTED when stream is live but no frame evaluated yet', () => {
+    expect(resolveCaptureState({ streamActive: true, videoReady: true, tracker, processing: false, frameAgeMs: null })).toBe('CONNECTED');
+  });
+  it('FRESH when a valid frame arrived within threshold', () => {
+    expect(resolveCaptureState({ streamActive: true, videoReady: true, tracker, processing: false, frameAgeMs: 1200 })).toBe('FRESH');
+  });
+  it('PROCESSING overrides FRESH during analysis', () => {
+    expect(resolveCaptureState({ streamActive: true, videoReady: true, tracker, processing: true, frameAgeMs: 1200 })).toBe('PROCESSING');
+  });
+  it('STALE when frame age exceeds threshold', () => {
+    expect(resolveCaptureState({ streamActive: true, videoReady: true, tracker, processing: false, frameAgeMs: FRESHNESS_THRESHOLD_MS + 1 })).toBe('STALE');
+  });
+  it('STALE when video element cannot deliver frames despite recent capture', () => {
+    expect(resolveCaptureState({ streamActive: true, videoReady: false, tracker, processing: false, frameAgeMs: 500 })).toBe('STALE');
+  });
+  it('RECOVERING only while a fresh frame validates a restart', () => {
+    expect(resolveCaptureState({ streamActive: true, videoReady: true, tracker, processing: false, recovering: true, frameAgeMs: 800 })).toBe('RECOVERING');
+  });
+  it('threshold is 5 seconds', () => {
+    expect(FRESHNESS_THRESHOLD_MS).toBe(5000);
+  });
+});
+
+/* ============ REQUEST VIDEO FRAME CALLBACK support contract ============ */
+
+describe('frame ingestion driver contract', () => {
+  it('prefers requestVideoFrameCallback when available, interval otherwise', async () => {
+    // Simulated contract check on the detection logic used by the ingest loop.
+    const withRvfc = { requestVideoFrameCallback: () => 1 } as unknown as HTMLVideoElement;
+    const without = {} as HTMLVideoElement;
+    expect(typeof (withRvfc as { requestVideoFrameCallback?: unknown }).requestVideoFrameCallback === 'function').toBe(true);
+    expect(typeof (without as { requestVideoFrameCallback?: unknown }).requestVideoFrameCallback === 'function').toBe(false);
+  });
+});

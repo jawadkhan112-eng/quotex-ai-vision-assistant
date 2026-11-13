@@ -7,6 +7,7 @@ import type { UnifiedDecision } from '../../server/unifiedDecisionEngine';
 import { alertManager } from '../services/alertManager';
 import { safeFetchJson, analyzeFrameViaJpeg } from '../services/safeFetch';
 import { createFrameQualityTracker, type FrameQualityTracker } from '../services/frameQuality';
+import { resolveCaptureState, captureStatusSnapshot, FRESHNESS_THRESHOLD_MS, type CaptureStatusSnapshot } from '../services/captureStatus';
 import { detectChartIdentity, disposeOcr } from '../services/chartIdentityService';
 import { describeIdentityChange, type ChartIdentity } from '../../server/chartIdentity';
 
@@ -18,10 +19,10 @@ interface Props { selectedSymbol: string; selectedTimeframe: string; }
 const CAPTURE_W = 960;
 const CAPTURE_H = 540;
 
-/** Honest monitoring status machine — never pretends a stale frame is live. */
-type MonitorStatus = 'IDLE' | 'STARTING' | 'RUNNING' | 'PAUSED' | 'STOPPED' | 'NO_FRESH_FRAME';
+/** Honest capture states — never confuse an active MediaStream with a fresh frame. */
+type MonitorStatus = 'CONNECTED' | 'FRESH' | 'PROCESSING' | 'STALE' | 'DISCONNECTED' | 'RECOVERING';
 
-const FRESH_FRAME_LIMIT_MS = 5000; // a frame older than this is NO FRESH FRAME
+const FRESH_FRAME_LIMIT_MS = FRESHNESS_THRESHOLD_MS; // shared threshold with captureStatus
 
 export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manualSymbol, selectedTimeframe: manualTimeframe }) => {
   const video = useRef<HTMLVideoElement>(null);
@@ -43,8 +44,12 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manual
   const [captureResolution, setCaptureResolution] = useState<string | null>(null);
   const [framesCaptured, setFramesCaptured] = useState(0);
   const [previewZoom, setPreviewZoom] = useState(false);
-  // Honest status: RUNNING means fresh frames are actually arriving.
-  const [status, setStatus] = useState<MonitorStatus>('IDLE');
+  // Honest status: FRESH means a genuinely new frame arrived; CONNECTED is just
+  // "stream object exists". STALE preserves the last result but labels it stale.
+  const [status, setStatus] = useState<MonitorStatus>('DISCONNECTED');
+  const [recovering, setRecovering] = useState(false);
+  const [lastAnalysisAt, setLastAnalysisAt] = useState<number | null>(null);
+  const [statusSnapshot, setStatusSnapshot] = useState<CaptureStatusSnapshot | null>(null);
   // Auto chart identity detection (pair / market type / timeframe via OCR).
   const [identity, setIdentity] = useState<ChartIdentity | null>(null);
   const [identityChanges, setIdentityChanges] = useState<string[]>([]);
@@ -68,16 +73,57 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manual
     return () => window.clearInterval(t);
   }, []);
 
-  // Honest status resolution: fresh frames arriving = RUNNING; stale = NO FRESH FRAME.
-  // Recovery is automatic: when a fresh frame arrives, the ingest loop updates
-  // lastCaptureAt and this effect flips NO_FRESH_FRAME back to RUNNING with no
-  // new session and no duplicate capture streams.
+  // Honest status resolution via the capture state machine. Recovery is
+  // automatic: when a valid frame arrives after STALE, framesValidated flips
+  // RECOVERING → FRESH with no new session and no duplicate streams.
   useEffect(() => {
-    if (!active) { setStatus(auto ? 'STOPPED' : 'IDLE'); return; }
-    if (paused) { setStatus('PAUSED'); return; }
-    if (lastCaptureAt && nowTick - lastCaptureAt > FRESH_FRAME_LIMIT_MS) setStatus('NO_FRESH_FRAME');
-    else if (lastCaptureAt) setStatus('RUNNING');
-  }, [active, paused, lastCaptureAt, nowTick, auto]);
+    const tracker = frameQuality.current;
+    const track = stream.current?.getVideoTracks()[0] ?? null;
+    const streamActive = Boolean(stream.current && track && track.readyState === 'live');
+    const frameAgeMs = lastCaptureAt === null ? null : nowTick - lastCaptureAt;
+    const next = resolveCaptureState({
+      streamActive: streamActive && !(!active),
+      videoReady: Boolean(video.current && video.current.readyState >= 2 && video.current.videoWidth > 0),
+      tracker, processing: working,
+      recovering,
+      visibilityState: document.visibilityState,
+      frameAgeMs: active && paused ? null : frameAgeMs,
+    });
+    if (!streamActive && active) setStatus('DISCONNECTED');
+    else setStatus(paused && active ? 'STALE' : next === 'PROCESSING' ? 'PROCESSING' : next);
+    setStatusSnapshot(captureStatusSnapshot({
+      streamActive, videoReady: Boolean(video.current && video.current.readyState >= 2),
+      tracker, processing: working, recovering,
+      lastFrameAt: lastCaptureAt, lastAnalysisAt,
+      track, now: nowTick, frameAgeMs,
+    }));
+  }, [active, paused, lastCaptureAt, nowTick, auto, working, recovering, lastAnalysisAt]);
+
+  // Track mute/unmute detection — muted track means frames may stop arriving.
+  useEffect(() => {
+    const track = stream.current?.getVideoTracks()[0] ?? null;
+    if (!track) return;
+    const onMute = () => setFrameNote('Video track muted — the shared source may be paused or hidden.');
+    const onUnmute = () => setFrameNote(null);
+    track.addEventListener('mute', onMute);
+    track.addEventListener('unmute', onUnmute);
+    return () => { track.removeEventListener('mute', onMute); track.removeEventListener('unmute', onUnmute); };
+  }, [active]);
+
+  // Background-tab handling: pause heavy ingestion while hidden (browser
+  // throttling makes timers unreliable anyway) but KEEP the stream alive; do
+  // not silently switch capture sources and never fake freshness.
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        setFrameNote('Application tab hidden — capture loop suspended, stream kept alive.');
+      } else {
+        setFrameNote(null); // resumes via normal ingest loop
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
 
   // Stream interruption detection: a shared track ending stops monitoring safely.
   useEffect(() => {
@@ -181,6 +227,7 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manual
       const data = response.data;
       setResult(data.result!);
       resultRef.current = data.result!;
+      setLastAnalysisAt(Date.now());
       // Chain into the engines using the real reconstructed candle geometry.
       void runDecision(data.result!);
       void runUnified(data.result!);
@@ -218,37 +265,58 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manual
   }, [active]);
 
   // Continuous background frame ingestion: latest-frame-wins capture loop.
-  // THE STALE-FRAME ROOT CAUSE FIX: this loop (500ms cadence) is now the source
-  // of lastCaptureAt — previously only the once-per-minute analysis updated it,
-  // so the freshness check saw >5s-old frames ~95% of the time and showed
-  // NO FRESH FRAME even while the stream was healthy.
+  // Preferred driver: requestVideoFrameCallback (fires ONLY when a genuinely new
+  // video frame is presented — the same frame is never processed twice as fresh).
+  // Fallback: 500ms interval (also works when rVFC is throttled in background tabs).
   const frameQuality = useRef<FrameQualityTracker | null>(null);
   const [frameNote, setFrameNote] = useState<string | null>(null);
+  const [frameSource, setFrameSource] = useState<'rVFC' | 'INTERVAL' | null>(null);
   useEffect(() => {
     if (!auto || !active || paused) return;
     if (!frameQuality.current) frameQuality.current = createFrameQualityTracker(FRESH_FRAME_LIMIT_MS);
     const sigCanvas = document.createElement('canvas'); // 64x36 signature sampler
     sigCanvas.width = 64; sigCanvas.height = 36;
     const sigCtx = sigCanvas.getContext('2d', { willReadFrequently: true })!;
+    let cancelled = false;
+    let intervalTimer = 0;
     const ingest = () => {
-      if (!video.current || !canvas.current || video.current.videoWidth === 0) return;
+      if (cancelled) return;
+      const v = video.current;
+      if (!v || !canvas.current) return;
+      // Validate the video element is actually delivering frames.
+      if (v.readyState < 2 || v.videoWidth === 0) return; // HAVE_CURRENT_DATA or better required
+      const track = stream.current?.getVideoTracks()[0];
+      if (track && track.readyState !== 'live') return;
       // Latest-frame-wins: always draw the newest video frame onto the shared analysis canvas.
       const context = canvas.current.getContext('2d', { willReadFrequently: true });
       canvas.current.width = CAPTURE_W; canvas.current.height = CAPTURE_H;
-      context?.drawImage(video.current, 0, 0, CAPTURE_W, CAPTURE_H);
+      context?.drawImage(v, 0, 0, CAPTURE_W, CAPTURE_H);
       // Cheap 64x36 signature for duplicate/frozen/blank detection.
-      sigCtx.drawImage(video.current, 0, 0, 64, 36);
+      sigCtx.drawImage(v, 0, 0, 64, 36);
       const sig = sigCtx.getImageData(0, 0, 64, 36).data;
       const check = frameQuality.current!.evaluate(sig);
       setFrameNote(check.verdict === 'FRESH' ? null : check.note);
       // A DUPLICATE frame still proves the stream is alive (timestamp advances);
       // BLANK/FROZEN frames do NOT refresh freshness — they are not valid chart data.
-      if (check.verdict === 'FRESH' || check.verdict === 'DUPLICATE') setLastCaptureAt(Date.now());
+      if (check.verdict === 'FRESH' || check.verdict === 'DUPLICATE') {
+        setLastCaptureAt(Date.now());
+        if (recovering) setRecovering(false); // validated: recovery complete
+      }
     };
-    ingest();
-    const timer = window.setInterval(ingest, 500);
-    return () => window.clearInterval(timer);
-  }, [auto, active, paused]);
+    const videoWithRvfc = video.current as HTMLVideoElement & { requestVideoFrameCallback?: (cb: (now: number) => void) => number };
+    if (typeof videoWithRvfc.requestVideoFrameCallback === 'function') {
+      setFrameSource('rVFC');
+      const loop = () => { if (cancelled) return; ingest(); videoWithRvfc.requestVideoFrameCallback!(loop); };
+      videoWithRvfc.requestVideoFrameCallback(loop);
+      // Safety net: rVFC can stall if the source stops producing; poll sparsely.
+      intervalTimer = window.setInterval(ingest, 2000);
+    } else {
+      setFrameSource('INTERVAL');
+      ingest();
+      intervalTimer = window.setInterval(ingest, 500);
+    }
+    return () => { cancelled = true; window.clearInterval(intervalTimer); };
+  }, [auto, active, paused, recovering]);
 
   // Candle-close synchronised analysis: exactly 30 seconds before closure the
   // high-priority analysis fires and the resulting signal is locked for instant
@@ -313,7 +381,7 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manual
     startingRef.current = false;
     setActive(false); setAuto(false); setPaused(false); setLastCaptureAt(null);
     setIdentity(null); setIdentityChanges([]); setUnified(null); setDecision(null);
-    setLockedSignal(null); setStatus('STOPPED');
+    setLockedSignal(null); setStatus('DISCONNECTED'); setRecovering(false); setLastAnalysisAt(null);
     frameQuality.current?.reset(); setFrameNote(null);
   }, []);
 
@@ -321,16 +389,17 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manual
   const start = useCallback(async () => {
     if (stream.current || startingRef.current) return;
     startingRef.current = true;
-    setStatus('STARTING');
+    setStatus('CONNECTED');
     try {
       stream.current = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
       stream.current.getVideoTracks()[0]?.addEventListener('ended', stop);
       setActive(true);
       setError('');
-      setStatus('RUNNING');
+      setStatus('CONNECTED');
+      setRecovering(false);
     } catch {
       startingRef.current = false;
-      setStatus('IDLE');
+      setStatus('DISCONNECTED');
       setError('Screen sharing was not granted. Share your Quotex chart screen so analysis uses real chart pixels.');
     }
   }, [stop]);
@@ -341,16 +410,27 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manual
     if (stream.current) setAuto(true);
   }, [start]);
 
+  /**
+   * RECONNECT SCREEN: user-gesture-only restart of getDisplayMedia after a
+   * DISCONNECTED state. Never bypasses browser permission prompts; frames are
+   * validated (RECOVERING) before LIVE status is restored.
+   */
+  const reconnect = useCallback(async () => {
+    stop();
+    setRecovering(true);
+    await startAuto();
+  }, [stop, startAuto]);
+
   // Safe cleanup on unmount — never leave orphan tracks running.
   useEffect(() => () => stop(), [stop]);
 
   const frameAgeSeconds = lastCaptureAt ? Math.round((nowTick - lastCaptureAt) / 1000) : null;
   const frameFresh = frameAgeSeconds !== null && frameAgeSeconds <= Math.ceil(FRESH_FRAME_LIMIT_MS / 1000);
   const statusLabel: Record<MonitorStatus, string> = {
-    IDLE: 'IDLE', STARTING: 'STARTING…', RUNNING: 'RUNNING', PAUSED: 'PAUSED', STOPPED: 'STOPPED', NO_FRESH_FRAME: 'NO FRESH FRAME',
+    CONNECTED: 'CONNECTED', FRESH: 'LIVE', PROCESSING: 'PROCESSING', STALE: 'STALE', DISCONNECTED: 'DISCONNECTED', RECOVERING: 'RECOVERING',
   };
   const statusTone: Record<MonitorStatus, string> = {
-    IDLE: 'text-slate-400', STARTING: 'text-cyan-300', RUNNING: 'text-emerald-300', PAUSED: 'text-amber-300', STOPPED: 'text-slate-500', NO_FRESH_FRAME: 'text-rose-300',
+    CONNECTED: 'text-cyan-300', FRESH: 'text-emerald-300', PROCESSING: 'text-cyan-300', STALE: 'text-amber-300', DISCONNECTED: 'text-slate-500', RECOVERING: 'text-cyan-300',
   };
 
   const predicted = unified?.prediction ?? 'WAIT';
@@ -385,7 +465,7 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manual
         {active && auto && (
           <button onClick={() => setPaused((value) => !value)} className={`border px-3 py-2 text-sm font-semibold ${paused ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200' : 'border-slate-600 bg-slate-800 text-slate-300'}`}>{paused ? <><Play className="mr-1 inline h-4 w-4" />Resume monitoring</> : <><Pause className="mr-1 inline h-4 w-4" />Pause monitoring</>}</button>
         )}
-        <button onClick={() => void (auto ? (setAuto(false), setStatus(active ? 'RUNNING' : 'STOPPED')) : startAuto())} className={`border px-4 py-2 text-sm font-semibold ${auto ? 'border-rose-400/40 bg-rose-400/10 text-rose-200' : 'border-cyan-400/40 bg-cyan-400/10 text-cyan-200'}`}>{auto ? 'Stop auto-monitoring' : 'Start auto-monitoring'}</button>
+        <button onClick={() => void (auto ? (setAuto(false), setRecovering(false)) : startAuto())} className={`border px-4 py-2 text-sm font-semibold ${auto ? 'border-rose-400/40 bg-rose-400/10 text-rose-200' : 'border-cyan-400/40 bg-cyan-400/10 text-cyan-200'}`}>{auto ? 'Stop auto-monitoring' : 'Start auto-monitoring'}</button>
         <button onClick={() => void run()} disabled={working} className="flex items-center gap-2 bg-cyan-400 px-4 py-2 text-sm font-bold text-slate-950 disabled:opacity-50"><Zap className="h-4 w-4" />{working ? 'Calculating…' : 'Analyse now'}</button>
       </div>
     </div>
@@ -406,8 +486,13 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manual
     {result && !result.chartDetection.isChart && (
       <div className="mb-4 flex items-start gap-3 border-2 border-amber-400 bg-amber-400/10 p-4 text-amber-200"><AlertTriangle className="mt-.5 h-6 w-6 shrink-0" /><div><p className="font-bold">No valid trading chart detected on shared screen</p><p className="mt-1 text-sm">Switch your screen share to the live Quotex chart window/tab, then let auto-monitoring re-validate the frame. No trading signals are generated from non-chart content.</p>{active && <p className="mt-1 font-mono text-xs">Validator score: {result.chartDetection.score}/100</p>}</div></div>
     )}
-    {status === 'NO_FRESH_FRAME' && (
-      <div className="mb-4 border-2 border-rose-400 bg-rose-400/10 p-4 text-rose-200"><p className="font-bold">NO FRESH FRAME — live decisions are stale</p><p className="mt-1 text-sm">Last captured frame is {frameAgeSeconds}s old (limit {FRESH_FRAME_LIMIT_MS / 1000}s). Old decisions are no longer presented as current. Check that screen sharing is still active.</p></div>
+    {(status === 'STALE' || status === 'DISCONNECTED') && (
+      <div className="mb-4 border-2 border-rose-400 bg-rose-400/10 p-4 text-rose-200">
+        <p className="font-bold">{status === 'DISCONNECTED' ? 'DISCONNECTED — screen sharing is not active' : 'STALE — no new valid frame within the freshness window'}</p>
+        <p className="mt-1 text-sm">Last valid frame: {lastCaptureAt ? `${new Date(lastCaptureAt).toLocaleTimeString()} (${frameAgeSeconds}s ago)` : 'none'} · threshold {FRESH_FRAME_LIMIT_MS / 1000}s. Existing decisions are marked STALE and no new signals are generated from old frames.</p>
+        {!active && <button onClick={() => void reconnect()} className="mt-2 border border-cyan-400/40 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-200">RECONNECT SCREEN — restart screen sharing</button>}
+        {active && status === 'STALE' && <p className="mt-2 font-mono text-xs">Recovery is automatic: a genuinely new frame restores LIVE status. If your chart is a static image or the shared window is hidden, resume it to refresh frames.</p>}
+      </div>
     )}
     {flashNewCandle && unified && unified.prediction !== 'WAIT' && (
       <div className={`mb-4 animate-pulse border-2 p-4 text-center text-lg font-black tracking-widest ${cardTone}`}>⚡ NEW CANDLE OPEN — {unified.prediction} · {unified.confluence}/100 confluence · For Next Candle Expiry</div>
@@ -433,7 +518,11 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manual
             <span>Frame age: {frameAgeSeconds !== null ? `${frameAgeSeconds}s` : '—'}{frameAgeSeconds !== null && !frameFresh ? ' (STALE)' : ''}</span>
             <span>Capture resolution: {captureResolution ?? '—'}</span>
             <span>Frames captured: {framesCaptured}{frameQuality.current ? ` · ${frameQuality.current.snapshot().duplicateFrames} duplicate · ${frameQuality.current.snapshot().blankFrames} blank` : ''}</span>
+            <span>Capture driver: {frameSource ?? '—'}{statusSnapshot ? ` · track: ${statusSnapshot.trackReadyState}${statusSnapshot.trackMuted ? ' (MUTED)' : ''}` : ''}</span>
+            <span>Last analysis: {lastAnalysisAt ? new Date(lastAnalysisAt).toLocaleTimeString() : '—'}</span>
+            <span>Processing: {working ? 'analyzing…' : decision || unified ? 'complete' : 'waiting for frames'}</span>
             <span>Status: <span className={statusTone[status]}>{statusLabel[status]}</span></span>
+            <span>Tab: {statusSnapshot?.visibilityState ?? document.visibilityState}</span>
           </div>
           {frameNote && <p className="mt-2 border border-amber-400/40 bg-amber-400/10 p-2 font-mono text-[11px] text-amber-200">{frameNote}</p>}
           <div className="mt-4 flex flex-wrap gap-3">
