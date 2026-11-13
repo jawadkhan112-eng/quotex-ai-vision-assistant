@@ -416,7 +416,8 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manual
           <p className="text-xs font-semibold uppercase tracking-widest text-slate-400">NEXT CANDLE PREDICTION</p>
           <div className={`mt-4 border p-5 text-center ${cardTone}`}>
             <div className="text-4xl font-black tracking-[.12em]">{unified ? unified.prediction : 'WAIT'}</div>
-            <div className="mt-2 font-mono text-sm">Confidence: {unified ? `${unified.predictionConfidence}%` : '—'}{unified && unified.prediction !== 'WAIT' ? '' : ''}</div>
+            {unified && <div className="mt-1 font-mono text-xs font-bold opacity-80">{unified.opportunityBand}{unified.opportunityBand === 'CAUTION' ? ' — trade with reduced size' : ''}</div>}
+            <div className="mt-2 font-mono text-sm">Confidence: {unified ? `${unified.predictionConfidence}%` : '—'}</div>
             <div className="mt-1 font-mono text-xs">Confluence: {unified ? `${unified.confluence}/100` : '—'} <span className="opacity-60">(evidence score, not win probability)</span></div>
           </div>
           <div className="mt-4 space-y-1 text-xs text-slate-300">
@@ -486,6 +487,11 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manual
         {unified.disagreeingFamilies.length > 0 && <p className="mt-2 font-mono text-[11px] text-amber-300">Families in disagreement: {unified.disagreeingFamilies.join(', ')}</p>}
         {unified.waitReason && <p className="mt-2 border border-amber-400/40 bg-amber-400/10 p-2 text-xs text-amber-200">WAIT reason: {unified.waitReason}</p>}
       </article>}
+      {/* BOTTOM: recent decision history with verified outcomes */}
+      {decision && <details className="mt-4 border border-slate-800 bg-slate-900/70 p-4 text-xs">
+        <summary className="cursor-pointer font-semibold text-slate-400">Recent candle decisions &amp; verified outcomes</summary>
+        <DecisionsTable />
+      </details>}
       {/* Supplementary SPI family-vote breakdown — collapsed, subordinate */}
       {decision && <details className="mt-5 border-l-2 border-violet-400 bg-slate-900/70 p-5">
         <summary className="cursor-pointer text-sm font-semibold"><Activity className="mr-2 inline h-4 w-4 text-violet-300" />Signal Provider Intelligence — family-vote breakdown (subordinate)</summary>
@@ -511,6 +517,42 @@ function badgeTone(signal: string): string {
       : 'border-amber-400 bg-amber-400/10 text-amber-300';
 }
 
+
+/** BOTTOM table: recent candle decisions with verified outcome states. */
+const DecisionsTable: React.FC = () => {
+  const [rows, setRows] = useState<Array<{ id: number; created_at: string; asset: string; market_type: string; timeframe: string; prediction: string; confluence_score: number; target_candle: string; outcome: string; source: string }>>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch('/api/decisions?limit=15');
+        const data = await res.json();
+        if (!cancelled && data.success) setRows(data.decisions);
+      } catch { /* history optional */ }
+    };
+    void load();
+    const t = window.setInterval(load, 15000);
+    return () => { cancelled = true; window.clearInterval(t); };
+  }, []);
+  const tone = (v: string) => v === 'UP' ? 'text-emerald-300' : v === 'DOWN' ? 'text-rose-300' : 'text-amber-300';
+  const outcomeTone = (v: string) => v === 'WIN' ? 'text-emerald-300' : v === 'LOSS' ? 'text-rose-300' : 'text-slate-500';
+  return <table className="mt-3 w-full text-left font-mono text-[11px]">
+    <thead className="border-b border-slate-800 text-[10px] uppercase tracking-wider text-slate-500"><tr>{['Time', 'Source', 'Pair', 'Market', 'TF', 'Prediction', 'Evidence', 'Target candle', 'Outcome'].map((h) => <th key={h} className="px-2 py-1">{h}</th>)}</tr></thead>
+    <tbody>{rows.length === 0 ? <tr><td colSpan={9} className="px-2 py-3 text-slate-500">No decisions recorded yet — decisions appear here as each candle is analysed.</td></tr> : rows.map((r) => (
+      <tr key={r.id} className="border-b border-slate-800/60">
+        <td className="px-2 py-1 text-slate-400">{new Date(r.created_at).toLocaleTimeString()}</td>
+        <td className="px-2 py-1 text-slate-500">{r.source}</td>
+        <td className="px-2 py-1 text-slate-200">{r.asset}</td>
+        <td className="px-2 py-1 text-slate-400">{r.market_type}</td>
+        <td className="px-2 py-1 text-slate-400">{r.timeframe}</td>
+        <td className={`px-2 py-1 font-bold ${tone(r.prediction)}`}>{r.prediction}</td>
+        <td className="px-2 py-1">{r.confluence_score}/100</td>
+        <td className="px-2 py-1 text-slate-500">{new Date(Number(r.target_candle)).toLocaleTimeString() || r.target_candle}</td>
+        <td className={`px-2 py-1 ${outcomeTone(r.outcome)}`}>{r.outcome}</td>
+      </tr>
+    ))}</tbody>
+  </table>;
+};
 
 /**
  * Left-side screenshot capture panel (Part 14). Captures the CURRENT frame from

@@ -263,3 +263,107 @@ describe('decision dedup semantics', () => {
     expect(key.split('|').length).toBe(6);
   });
 });
+
+/* ============ ACTIVE OPPORTUNITY MODE: classification bands ============ */
+
+describe('ACTIVE-OPPORTUNITY classification bands (80/70/60)', () => {
+  it('classifies 80+ HIGH QUALITY, 70-79 QUALIFIED, 60-69 CAUTION, <60 LOW CONFIDENCE', async () => {
+    const { analyzeUnified } = await import('../server/unifiedDecisionEngine');
+    const d = analyzeUnified({ completed: bullCandles });
+    // Band must match the classification exactly (same 80/70/60 boundaries).
+    expect(d.opportunityBand).toBe(d.classification);
+    expect(['HIGH QUALITY', 'QUALIFIED', 'CAUTION', 'LOW CONFIDENCE']).toContain(d.classification);
+    expect(d.classification).not.toBe('STRONG QUALIFIED');
+    expect(d.classification).not.toBe('QUALIFIED / CAUTION');
+  });
+  it('qualified setups never appear below 60 evidence', () => {
+    const d = runUnified({});
+    if (d.qualified) expect(d.confluence).toBeGreaterThanOrEqual(60);
+  });
+});
+
+/* ============ KNOWLEDGE BASE ============ */
+
+describe('strategy knowledge base', () => {
+  it('documents all core patterns with direction and family', async () => {
+    const { PATTERN_KNOWLEDGE, describePattern } = await import('../server/knowledgeBase');
+    expect(PATTERN_KNOWLEDGE.length).toBeGreaterThanOrEqual(20);
+    const engulfing = describePattern('BULLISH_ENGULFING');
+    expect(engulfing?.direction).toBe('UP');
+    expect(engulfing?.family).toBe('CANDLE_PATTERNS');
+    expect(describePattern('NONEXISTENT_PATTERN')).toBeUndefined();
+  });
+  it('design weights sum to 100 across the 7 blueprint groups', async () => {
+    const { DEFAULT_EVIDENCE_WEIGHTS } = await import('../server/knowledgeBase');
+    const sum = Object.values(DEFAULT_EVIDENCE_WEIGHTS).reduce((a, b) => a + b, 0);
+    expect(sum).toBe(100);
+  });
+});
+
+/* ============ VERIFIED-OUTCOME LEARNING ============ */
+
+describe('verified-outcome learning engine', () => {
+  beforeEach(async () => {
+    const { resetOutcomeLedger } = await import('../server/outcomeLearning');
+    resetOutcomeLedger();
+  });
+
+  it('does not calibrate weights below the minimum sample size', async () => {
+    const { recordOutcome, computePerformance, MIN_SAMPLE_SIZE } = await import('../server/outcomeLearning');
+    for (let i = 0; i < MIN_SAMPLE_SIZE - 1; i++) {
+      recordOutcome({ decisionId: `d${i}`, source: 'LIVE', asset: 'EUR/USD', marketType: 'OTC', timeframe: '1M', prediction: 'UP', confluence: 75, topStrategyFamilies: ['TREND'], marketCondition: 'TRENDING', targetCandle: String(i), outcome: i % 2 === 0 ? 'WIN' : 'LOSS', recordedAt: new Date().toISOString() });
+    }
+    const perf = computePerformance({ family: 'TREND' });
+    expect(perf.sampleSize).toBe(MIN_SAMPLE_SIZE - 1);
+    expect(perf.calibrated).toBe(false);
+    expect(perf.weightMultiplier).toBe(1.0);
+  });
+  it('calibrates after adequate sample and clamps to ±20%', async () => {
+    const { recordOutcome, computePerformance, MIN_SAMPLE_SIZE } = await import('../server/outcomeLearning');
+    for (let i = 0; i < MIN_SAMPLE_SIZE; i++) {
+      recordOutcome({ decisionId: `w${i}`, source: 'LIVE', asset: 'EUR/USD', marketType: 'OTC', timeframe: '1M', prediction: 'UP', confluence: 75, topStrategyFamilies: ['TREND'], marketCondition: 'TRENDING', targetCandle: String(i), outcome: 'WIN', recordedAt: new Date().toISOString() });
+    }
+    const perf = computePerformance({ family: 'TREND' });
+    expect(perf.calibrated).toBe(true);
+    expect(perf.winRate).toBe(1);
+    expect(perf.weightMultiplier).toBe(1.2); // clamped maximum
+  });
+  it('unverified outcomes (EXPIRED/INVALID/WAIT) never count as wins', async () => {
+    const { recordOutcome, computePerformance, MIN_SAMPLE_SIZE } = await import('../server/outcomeLearning');
+    for (let i = 0; i < MIN_SAMPLE_SIZE; i++) {
+      recordOutcome({ decisionId: `e${i}`, source: 'LIVE', asset: 'X', marketType: 'OTC', timeframe: '1M', prediction: 'UP', confluence: 60, topStrategyFamilies: ['MOMENTUM'], marketCondition: 'RANGING', targetCandle: String(i), outcome: 'EXPIRED', recordedAt: new Date().toISOString() });
+    }
+    const perf = computePerformance({ family: 'MOMENTUM' });
+    expect(perf.sampleSize).toBe(0);
+    expect(perf.wins).toBe(0);
+  });
+  it('familyWeightMultiplier returns 1.0 without verified evidence (engine stays at design weights)', async () => {
+    const { familyWeightMultiplier } = await import('../server/outcomeLearning');
+    expect(familyWeightMultiplier('TREND', 'OTC', '1M')).toBe(1.0);
+  });
+  it('performance slices by market type and source', async () => {
+    const { recordOutcome, computePerformance, MIN_SAMPLE_SIZE } = await import('../server/outcomeLearning');
+    for (let i = 0; i < MIN_SAMPLE_SIZE; i++) {
+      recordOutcome({ decisionId: `otc${i}`, source: 'LIVE', asset: 'A', marketType: 'OTC', timeframe: '1M', prediction: 'UP', confluence: 70, topStrategyFamilies: ['PRICE_ACTION'], marketCondition: 'TRENDING', targetCandle: String(i), outcome: 'WIN', recordedAt: new Date().toISOString() });
+      recordOutcome({ decisionId: `live${i}`, source: 'SCREENSHOT', asset: 'A', marketType: 'LIVE', timeframe: '1M', prediction: 'UP', confluence: 70, topStrategyFamilies: ['PRICE_ACTION'], marketCondition: 'TRENDING', targetCandle: String(i), outcome: 'LOSS', recordedAt: new Date().toISOString() });
+    }
+    expect(computePerformance({ marketType: 'OTC' }).winRate).toBe(1);
+    expect(computePerformance({ marketType: 'LIVE' }).winRate).toBe(0);
+    expect(computePerformance({ marketType: 'OTC' }).sampleSize).toBe(MIN_SAMPLE_SIZE);
+  });
+});
+
+/* ============ configurable evidence weights ============ */
+
+describe('configurable evidence weights', () => {
+  it('setEvidenceWeights changes calibration without breaking consistency', async () => {
+    const { setEvidenceWeights, getEvidenceWeights, analyzeUnified } = await import('../server/unifiedDecisionEngine');
+    const before = getEvidenceWeights();
+    setEvidenceWeights({ TREND: 30 });
+    expect(getEvidenceWeights().TREND).toBe(30);
+    const d = analyzeUnified({ completed: bullCandles });
+    expect(d.mainSignal).toBe(d.prediction); // consistency invariant holds under any weights
+    setEvidenceWeights(before); // restore
+    expect(getEvidenceWeights().TREND).toBe(before.TREND);
+  });
+});

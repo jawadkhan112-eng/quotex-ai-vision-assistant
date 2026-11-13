@@ -8,6 +8,7 @@ import { analyzeProviderCandles, PROVIDER_ENGINE_VERSION, type ProviderCandle } 
 import { analyzeUnified, UNIFIED_ENGINE_VERSION, type UnifiedDecision } from './server/unifiedDecisionEngine.js';
 import { createScreenshotSession, hashImageBytes, resetScreenshotSessions, type ScreenshotAnalysisSession } from './server/screenshotSession.js';
 import { reportOutcome, lossGate, snapshotLossState, resetLossManagement, getLossConfig, configureLossManagement } from './server/lossManagement.js';
+import { recordOutcome, performanceReport, MIN_SAMPLE_SIZE } from './server/outcomeLearning.js';
 import { computeCandleTiming, isSupportedTimeframe } from './server/candleTiming.js';
 import jpegDecode from 'jpeg-js';
 
@@ -169,6 +170,7 @@ app.post('/api/unified-decision', (req, res) => {
     let decision: UnifiedDecision = analyzeUnified({
       provider, legacy: { signal: legacy.signal, confidenceScore: legacy.confidenceScore, trendFilter: legacy.trendFilter },
       completed: validCompleted, developing, indicatorsAvailable,
+      marketType, timeframe,
     });
 
     // Loss gate: a previous loss can only ADD a WAIT (cooldown/suspension) —
@@ -186,6 +188,26 @@ app.post('/api/unified-decision', (req, res) => {
     const timing = isSupportedTimeframe(timeframe)
       ? computeCandleTiming(timeframe, capturedAt ? Number(capturedAt) : Date.now())
       : null;
+
+    // Persist the unified decision with the exact target-candle timestamp so the
+    // dedup key (source|asset|market|tf|targetCandle|version) enforces one decision
+    // per verified completed candle.
+    const target = timing ? String(timing.nextCandleStart) : String(targetCandle ?? 'unknown');
+    const decisionId = `DEC-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const dedupKey = `${source}|${asset}|${marketType}|${timeframe}|${target}|${UNIFIED_ENGINE_VERSION}`;
+    try {
+      db.prepare(`INSERT INTO candle_decisions (decision_id, created_at, asset, market_type, timeframe, target_candle, prediction, prediction_confidence, confluence_score, classification, qualified, explanation, wait_reason, data_quality, candles_analyzed, source, outcome, analysis_version, dedup_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)`)
+        .run(decisionId, new Date().toISOString(), asset, marketType, timeframe, target,
+          decision.prediction, decision.predictionConfidence, decision.confluence, decision.classification,
+          decision.qualified ? 1 : 0, decision.supportingEvidence.map((e) => `[${e.family}] ${e.note}`).join(' | '),
+          decision.waitReason ?? null, decision.dataQuality, decision.candlesAnalyzed, source,
+          UNIFIED_ENGINE_VERSION, dedupKey);
+    } catch (persistError: any) {
+      // UNIQUE violation = duplicate decision for the same target candle — not an error.
+      if (!String(persistError.message).includes('UNIQUE')) throw persistError;
+    }
+    (decision as UnifiedDecision & { decisionId?: string }).decisionId = decisionId;
 
     res.json({
       success: true,
@@ -246,6 +268,29 @@ app.post('/api/loss-management/config', (req, res) => {
   });
   res.json({ success: true, config: getLossConfig(), local: true });
 });
+
+// ---- Verified-outcome learning: record decision outcomes, report performance ----
+app.post('/api/outcomes', (req, res) => {
+  const { decisionId, source, asset, marketType, timeframe, prediction, confluence, topStrategyFamilies, marketCondition, targetCandle, outcome, observedMove } = req.body || {};
+  if (!decisionId || !['WIN', 'LOSS', 'EXPIRED', 'INVALID'].includes(outcome)) {
+    return res.status(400).json({ success: false, error: 'decisionId and outcome (WIN|LOSS|EXPIRED|INVALID) are required.' });
+  }
+  recordOutcome({
+    decisionId: String(decisionId),
+    source: source === 'SCREENSHOT' ? 'SCREENSHOT' : 'LIVE',
+    asset: String(asset ?? 'UNKNOWN'), marketType: String(marketType ?? 'UNKNOWN'),
+    timeframe: String(timeframe ?? 'UNKNOWN'),
+    prediction: prediction === 'UP' ? 'UP' : prediction === 'DOWN' ? 'DOWN' : 'WAIT',
+    confluence: Math.max(0, Math.min(100, Number(confluence) || 0)),
+    topStrategyFamilies: Array.isArray(topStrategyFamilies) ? topStrategyFamilies.map(String) : [],
+    marketCondition: marketCondition === 'TRENDING' ? 'TRENDING' : 'RANGING',
+    targetCandle: String(targetCandle ?? 'unknown'),
+    outcome, observedMove: Number.isFinite(Number(observedMove)) ? Number(observedMove) : undefined,
+    recordedAt: new Date().toISOString(),
+  });
+  res.json({ success: true, local: true });
+});
+app.get('/api/outcomes/performance', (_req, res) => res.json({ success: true, performance: performanceReport(), minSampleSize: MIN_SAMPLE_SIZE, local: true }));
 
 // ---- MTG (Martingale) persistent recovery chains ----
 // A chain records the original signal (level 0) and up to two visually verified

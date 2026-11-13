@@ -19,6 +19,7 @@
  */
 
 import type { ProviderCandle, ProviderDecision } from './modules/signalProviderIntelligence.js';
+import { familyWeightMultiplier } from './outcomeLearning.js';
 
 export type Direction = 'UP' | 'DOWN' | 'WAIT';
 
@@ -45,8 +46,10 @@ export interface UnifiedDecision {
   predictionConfidence: number;
   /** 0-100 evidence score (NOT a win probability) */
   confluence: number;
-  classification: 'HIGH QUALITY' | 'STRONG QUALIFIED' | 'QUALIFIED / CAUTION' | 'LOW CONFIDENCE';
+  classification: 'HIGH QUALITY' | 'QUALIFIED' | 'CAUTION' | 'LOW CONFIDENCE';
   qualified: boolean;
+  /** ACTIVE-OPPORTUNITY band: HIGH QUALITY 80+, QUALIFIED 70-79, CAUTION 60-69, LOW <60 */
+  opportunityBand: 'HIGH QUALITY' | 'QUALIFIED' | 'CAUTION' | 'LOW CONFIDENCE';
   supportingEvidence: StrategyEvidence[];
   opposingEvidence: StrategyEvidence[];
   /** Precise WAIT reason: which families disagree, what evidence is missing */
@@ -68,8 +71,9 @@ const FAMILIES = [
 ] as const;
 export type Family = (typeof FAMILIES)[number];
 
-/** Relative weight of each family in the ensemble (sums to 100). */
-const FAMILY_WEIGHT: Record<Family, number> = {
+/** Relative weight of each family in the ensemble. Calibratable — overrides from
+ * verified outcomes are applied via outcomeLearning at decision time. */
+let FAMILY_WEIGHT: Record<Family, number> = {
   TREND: 14,
   MOMENTUM: 12,
   PRICE_ACTION: 15,
@@ -80,6 +84,14 @@ const FAMILY_WEIGHT: Record<Family, number> = {
   CANDLE_SEQUENCE: 9,
   REVERSAL: 7,
 };
+
+/** Allow operators/tests to recalibrate the design weights. */
+export function setEvidenceWeights(weights: Partial<Record<Family, number>>): void {
+  FAMILY_WEIGHT = { ...FAMILY_WEIGHT, ...weights };
+}
+export function getEvidenceWeights(): Record<Family, number> {
+  return { ...FAMILY_WEIGHT };
+}
 
 /** Which family a SPI strategy-voter belongs to — folds correlated voters into one. */
 function familyOf(strategy: string): Family {
@@ -191,6 +203,10 @@ export interface UnifiedInput {
   legacy?: { signal: 'CALL' | 'PUT' | 'WAIT'; confidenceScore: number; trendFilter: string } | null;
   completed: ProviderCandle[];
   developing?: ProviderCandle;
+  /** Detected market type — used for verified-outcome weight calibration */
+  marketType?: string;
+  /** Detected timeframe — used for verified-outcome weight calibration */
+  timeframe?: string;
   /** When false, missing indicator evidence (RSI/Bollinger) does NOT force WAIT —
    * price-action evidence alone can qualify a decision. */
   indicatorsAvailable?: boolean;
@@ -204,7 +220,7 @@ export function analyzeUnified(input: UnifiedInput): UnifiedDecision {
   if (n < 3) {
     return {
       mainSignal: 'WAIT', prediction: 'WAIT', predictionConfidence: 0, confluence: 0,
-      classification: 'LOW CONFIDENCE', qualified: false,
+      classification: 'LOW CONFIDENCE', opportunityBand: 'LOW CONFIDENCE', qualified: false,
       supportingEvidence: [], opposingEvidence: [],
       waitReason: `Insufficient completed candles: ${n}/3 minimum. Share more chart history.`,
       disagreeingFamilies: [], dataQuality: 'LOW', candlesAnalyzed: n,
@@ -265,17 +281,17 @@ export function analyzeUnified(input: UnifiedInput): UnifiedDecision {
   const opposing: StrategyEvidence[] = [];
 
   // Determine dominant side first so supporting/opposing lists are correct.
-  const weighted = new Map<Family, { dir: Direction | 'NEUTRAL'; weighted: number }>();
   for (const [fam, fs] of byFamily) {
-    const w = fs.score * FAMILY_WEIGHT[fam];
-    weighted.set(fam, { dir: fs.direction, weighted: w });
+    // Verified-outcome learning multiplier: 1.0 unless ≥12 verified outcomes exist.
+    const learned = familyWeightMultiplier(fam, input.marketType ?? 'UNKNOWN', input.timeframe ?? 'UNKNOWN');
+    const w = fs.score * FAMILY_WEIGHT[fam] * learned;
     if (fs.direction === 'UP') upScore += w;
     else if (fs.direction === 'DOWN') downScore += w;
     else neutralScore += w;
   }
 
   const dominant: Direction = upScore === downScore ? 'WAIT' : upScore > downScore ? 'UP' : 'DOWN';
-  for (const [fam, fs] of byFamily) {
+  for (const fs of byFamily.values()) {
     for (const m of fs.members) {
       const aligned = dominant !== 'WAIT' && m.direction === dominant;
       if (aligned) supporting.push(m);
@@ -313,7 +329,7 @@ export function analyzeUnified(input: UnifiedInput): UnifiedDecision {
   const confluence = Math.max(0, Math.min(100, Math.round((dominantRaw / (dominantRaw + neutralScore + 35)) * 105)));
 
   const classification: UnifiedDecision['classification'] =
-    confluence >= 80 ? 'HIGH QUALITY' : confluence >= 70 ? 'STRONG QUALIFIED' : confluence >= 60 ? 'QUALIFIED / CAUTION' : 'LOW CONFIDENCE';
+    confluence >= 80 ? 'HIGH QUALITY' : confluence >= 70 ? 'QUALIFIED' : confluence >= 60 ? 'CAUTION' : 'LOW CONFIDENCE';
 
   const dataQuality: UnifiedDecision['dataQuality'] = n >= 8 ? 'HIGH' : n >= 5 ? 'MEDIUM' : 'LOW';
 
@@ -327,6 +343,7 @@ export function analyzeUnified(input: UnifiedInput): UnifiedDecision {
     predictionConfidence,
     confluence,
     classification,
+    opportunityBand: classification,
     qualified: confluence >= 60 && prediction !== 'WAIT',
     supportingEvidence: supporting.slice(0, 8),
     opposingEvidence: opposing.slice(0, 8),

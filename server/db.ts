@@ -145,6 +145,22 @@ export function initDb() {
       dedup_key TEXT UNIQUE NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS strategy_outcomes (
+      decision_id TEXT PRIMARY KEY,
+      recorded_at TEXT NOT NULL,
+      source TEXT NOT NULL,
+      asset TEXT NOT NULL,
+      market_type TEXT NOT NULL,
+      timeframe TEXT NOT NULL,
+      prediction TEXT NOT NULL,
+      confluence INTEGER NOT NULL,
+      top_strategy_families TEXT NOT NULL,
+      market_condition TEXT NOT NULL,
+      target_candle TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      observed_move REAL
+    );
+
     CREATE TABLE IF NOT EXISTS screenshot_analyses (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       created_at TEXT NOT NULL,
