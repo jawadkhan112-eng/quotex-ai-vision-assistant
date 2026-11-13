@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, Camera, Square, Zap, AlertTriangle, Timer, Volume2, VolumeX, ClipboardPaste, Image as ImageIcon } from 'lucide-react';
+import { Activity, Camera, Square, Zap, AlertTriangle, Timer, Volume2, VolumeX, ClipboardPaste, Image as ImageIcon, Maximize2, Pause, Play } from 'lucide-react';
 import type { AlgoAnalysisResult as ShotAnalysisResult } from '../types';
 import type { AlgoAnalysisResult } from '../types';
 import type { ProviderDecision } from '../../server/modules/signalProviderIntelligence';
@@ -17,7 +17,12 @@ interface Props { selectedSymbol: string; selectedTimeframe: string; }
 const CAPTURE_W = 960;
 const CAPTURE_H = 540;
 
-export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, selectedTimeframe }) => {
+/** Honest monitoring status machine — never pretends a stale frame is live. */
+type MonitorStatus = 'IDLE' | 'STARTING' | 'RUNNING' | 'PAUSED' | 'STOPPED' | 'NO_FRESH_FRAME';
+
+const FRESH_FRAME_LIMIT_MS = 5000; // a frame older than this is NO FRESH FRAME
+
+export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol: manualSymbol, selectedTimeframe: manualTimeframe }) => {
   const video = useRef<HTMLVideoElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const stream = useRef<MediaStream | null>(null);
@@ -32,15 +37,22 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
   const [lockedSignal, setLockedSignal] = useState<AlgoAnalysisResult | null>(null);
   const [paused, setPaused] = useState(false);
   const [lastCaptureAt, setLastCaptureAt] = useState<number | null>(null);
+  // Ticking clock so frame age re-renders every second.
+  const [nowTick, setNowTick] = useState(Date.now());
+  const [captureResolution, setCaptureResolution] = useState<string | null>(null);
+  const [framesCaptured, setFramesCaptured] = useState(0);
+  const [previewZoom, setPreviewZoom] = useState(false);
+  // Honest status: RUNNING means fresh frames are actually arriving.
+  const [status, setStatus] = useState<MonitorStatus>('IDLE');
   // Auto chart identity detection (pair / market type / timeframe via OCR).
   const [identity, setIdentity] = useState<ChartIdentity | null>(null);
   const [identityChanges, setIdentityChanges] = useState<string[]>([]);
   const [ocrBusy, setOcrBusy] = useState(false);
+  const [ocrRawSample, setOcrRawSample] = useState<string | null>(null);
   const resultRef = useRef<AlgoAnalysisResult | null>(null);
   const startingRef = useRef(false); // duplicate-session guard
   // Signal Provider Intelligence: candle-by-candle UP/DOWN/WAIT decision state.
   const [decision, setDecision] = useState<ProviderDecision | null>(null);
-  const [decisionBusy, setDecisionBusy] = useState(false);
   // Unified authoritative decision — the ONE consistent result shown in the live panel.
   const [unified, setUnified] = useState<UnifiedDecision | null>(null);
   const [unifiedTiming, setUnifiedTiming] = useState<{ secondsToClose: number; nextCandleStart: number; nextCandleExpiry: number; candleStart: number; candleClose: number; timeframe: string } | null>(null);
@@ -49,32 +61,52 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     if (active && video.current && stream.current) video.current.srcObject = stream.current;
   }, [active]);
 
+  // 1-second ticker for frame age + status freshness display.
+  useEffect(() => {
+    const t = window.setInterval(() => setNowTick(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  // Honest status resolution: fresh frames arriving = RUNNING; stale = NO FRESH FRAME.
+  useEffect(() => {
+    if (!active) { setStatus(auto ? 'STOPPED' : 'IDLE'); return; }
+    if (paused) { setStatus('PAUSED'); return; }
+    if (lastCaptureAt && nowTick - lastCaptureAt > FRESH_FRAME_LIMIT_MS) setStatus('NO_FRESH_FRAME');
+    else if (lastCaptureAt) setStatus('RUNNING');
+  }, [active, paused, lastCaptureAt, nowTick, auto]);
+
+  // Stream interruption detection: a shared track ending stops monitoring safely.
+  useEffect(() => {
+    const tracks = stream.current?.getVideoTracks() ?? [];
+    const onEnded = () => { setActive(false); setAuto(false); setError('Screen share ended (stream interrupted). Restart monitoring to resume.'); };
+    tracks.forEach((t) => t.addEventListener('ended', onEnded));
+    return () => tracks.forEach((t) => t.removeEventListener('ended', onEnded));
+  }, [active]);
+
   const runDecision = useCallback(async (analysis: AlgoAnalysisResult) => {
     const reconstructed = (analysis as { reconstructedCandles?: Array<{ open: number; high: number; low: number; close: number; quality?: number }> }).reconstructedCandles ?? [];
     if (reconstructed.length < 3) { setDecision(null); return; }
-    setDecisionBusy(true);
     try {
       const res = await safeFetchJson<{ success: boolean; decision?: ProviderDecision; meta?: Record<string, unknown>; error?: string }>('/api/provider-analysis', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           completed: reconstructed.map((c) => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
           window: reconstructed.length >= 10 ? 10 : 5,
+          // Detected identity ONLY — a manual fallback is never labelled OCR-detected.
           asset: identity?.pair.pair ?? analysis.detectedAsset ?? 'UNKNOWN',
           marketType: identity?.marketType.marketType ?? 'UNKNOWN',
-          timeframe: identity?.timeframe.timeframe ?? analysis.detectedTimeframe ?? 'UNKNOWN',
+          timeframe: identity?.timeframe.timeframe ?? 'UNKNOWN',
           source: 'LIVE',
         }),
       });
       if (res.ok && res.data?.success && res.data.decision) {
         setDecision(res.data.decision);
-        // Persist with dedup (source|asset|market|timeframe|targetCandle|version) — one decision per analysis context.
         void safeFetchJson('/api/decisions', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ decision: res.data.decision, meta: { ...res.data.meta, targetCandle: Date.now() } }),
         });
       }
     } catch { /* decision is supplementary; analysis result remains authoritative */ }
-    finally { setDecisionBusy(false); }
   }, [identity]);
 
   /**
@@ -92,7 +124,7 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
           window: reconstructed.length >= 10 ? 10 : 5,
           asset: identity?.pair.pair ?? analysis.detectedAsset ?? 'UNKNOWN',
           marketType: identity?.marketType.marketType ?? 'UNKNOWN',
-          timeframe: identity?.timeframe.timeframe ?? analysis.detectedTimeframe ?? 'UNKNOWN',
+          timeframe: identity?.timeframe.timeframe ?? 'UNKNOWN',
           source: 'LIVE',
         }),
       });
@@ -113,6 +145,8 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
         context?.drawImage(video.current, 0, 0, CAPTURE_W, CAPTURE_H);
         analysisCanvas = canvas.current;
         setLastCaptureAt(Date.now());
+        setFramesCaptured((f) => f + 1);
+        setCaptureResolution(`${video.current.videoWidth}×${video.current.videoHeight} → ${CAPTURE_W}×${CAPTURE_H}`);
       }
       // Real screen data only: without an active shared frame or user-supplied price
       // series, analysis is refused rather than falling back to synthetic prices.
@@ -123,7 +157,7 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
       }
       // JPEG transport: ~100KB payload instead of multi-MB JSON — the 413 fix.
       const response = await analyzeFrameViaJpeg<{ success: boolean; result?: AlgoAnalysisResult; error?: string }>(analysisCanvas, {
-        symbol: selectedSymbol, timeframe: selectedTimeframe,
+        symbol: identity?.pair.pair ?? manualSymbol, timeframe: identity?.timeframe.timeframe ?? manualTimeframe,
       });
       if (!response.ok || !response.data?.success) {
         throw new Error(response.error ?? 'Analysis request failed.');
@@ -131,14 +165,12 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
       const data = response.data;
       setResult(data.result!);
       resultRef.current = data.result!;
-      // Chain into the Signal Provider Intelligence engine using the real
-      // reconstructed candle geometry — a decision for EVERY analysis pass.
+      // Chain into the engines using the real reconstructed candle geometry.
       void runDecision(data.result!);
-      // One authoritative unified decision per analysis pass.
       void runUnified(data.result!);
     } catch (caught) { setError(caught instanceof Error ? caught.message : 'Local analysis failed.'); }
     finally { setWorking(false); }
-  }, [active, paused, selectedSymbol, selectedTimeframe, runDecision, runUnified]);
+  }, [active, paused, manualSymbol, manualTimeframe, identity, runDecision, runUnified]);
 
   // Chart identity detection: throttled OCR pass on the shared frame. Runs only
   // when a canvas frame exists; identity change invalidates the locked signal.
@@ -151,11 +183,13 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
       setOcrBusy(true);
       try {
         const detection = await detectChartIdentity(video.current!, video.current!.videoWidth, video.current!.videoHeight);
+        if (detection.ocrText) setOcrRawSample(detection.ocrText.slice(0, 240));
         setIdentity((previous) => {
           const changes = describeIdentityChange(previous, detection.identity);
           if (changes.length > 0 && previous) {
             setIdentityChanges(changes);
             setLockedSignal(null); // old chart's signal must not contaminate the new chart
+            setUnified(null); setDecision(null); // pair/market/timeframe change resets the session
           }
           return detection.identity;
         });
@@ -204,15 +238,12 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
       setPreCloseActive(inWindow);
       if (second >= 30 && firedForMinute !== now.getMinutes()) {
         firedForMinute = now.getMinutes();
-
         void runRef.current(); // 30-second pre-close frame capture + high-priority analysis
       }
       if (second < 30 && lockedForMinute !== now.getMinutes() && resultRef.current) {
         lockedForMinute = now.getMinutes();
         const finalResult = resultRef.current;
         setLockedSignal(finalResult);
-        // Signal locked at candle close — dispatch through the alert manager
-        // (sound + browser notifications + persisted alert log, dedup-protected).
         if (finalResult.signal !== 'WAIT' && finalResult.chartDetection.isChart) {
           void alertManager.dispatch({
             signalId: finalResult.signalId,
@@ -228,14 +259,13 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
               void fetch('/api/alerts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ signalId: finalResult.signalId, channels }) });
             }
           });
-          // Persist the signal record with its unique ID for outcome tracking.
           void fetch('/api/signals', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ result: finalResult, inputSource: 'LIVE_FRAME' }) });
         }
       }
       if (second >= 0 && second < 2 && openedForMinute !== now.getMinutes()) {
         openedForMinute = now.getMinutes();
         setFlashNewCandle(true);
-        window.setTimeout(() => setFlashNewCandle(false), 6000); // flash alert at new candle open
+        window.setTimeout(() => setFlashNewCandle(false), 6000);
       }
     };
     tick();
@@ -248,61 +278,79 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     stream.current = null;
     startingRef.current = false;
     setActive(false); setAuto(false); setPaused(false); setLastCaptureAt(null);
-    setIdentity(null); setIdentityChanges([]);
+    setIdentity(null); setIdentityChanges([]); setUnified(null); setDecision(null);
+    setLockedSignal(null); setStatus('STOPPED');
   }, []);
 
+  /** One valid screen-sharing session; guards against overlapping streams. */
   const start = useCallback(async () => {
-    if (stream.current || startingRef.current) return; // single active session guard
+    if (stream.current || startingRef.current) return;
     startingRef.current = true;
+    setStatus('STARTING');
     try {
       stream.current = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
       stream.current.getVideoTracks()[0]?.addEventListener('ended', stop);
       setActive(true);
       setError('');
+      setStatus('RUNNING');
     } catch {
       startingRef.current = false;
+      setStatus('IDLE');
       setError('Screen sharing was not granted. Share your Quotex chart screen so analysis uses real chart pixels.');
     }
   }, [stop]);
 
+  /** Start auto-monitoring = start the stream AND the analysis loop together. */
+  const startAuto = useCallback(async () => {
+    if (!stream.current) await start();
+    if (stream.current) setAuto(true);
+  }, [start]);
+
   // Safe cleanup on unmount — never leave orphan tracks running.
   useEffect(() => () => stop(), [stop]);
 
-  const badgeTone =
-    result?.signal === 'CALL'
-      ? 'border-emerald-400 bg-emerald-400/10 text-emerald-300'
-      : result?.signal === 'PUT'
-        ? 'border-rose-400 bg-rose-400/10 text-rose-300'
-        : 'border-amber-400 bg-amber-400/10 text-amber-300';
-  const badgeLabel = result
-    ? result.expiry.recommendation === 'WAIT'
-      ? '🟡 WAIT'
-      : result.actionBadge
-    : '🟡 WAIT';
+  const frameAgeSeconds = lastCaptureAt ? Math.round((nowTick - lastCaptureAt) / 1000) : null;
+  const frameFresh = frameAgeSeconds !== null && frameAgeSeconds <= Math.ceil(FRESH_FRAME_LIMIT_MS / 1000);
+  const statusLabel: Record<MonitorStatus, string> = {
+    IDLE: 'IDLE', STARTING: 'STARTING…', RUNNING: 'RUNNING', PAUSED: 'PAUSED', STOPPED: 'STOPPED', NO_FRESH_FRAME: 'NO FRESH FRAME',
+  };
+  const statusTone: Record<MonitorStatus, string> = {
+    IDLE: 'text-slate-400', STARTING: 'text-cyan-300', RUNNING: 'text-emerald-300', PAUSED: 'text-amber-300', STOPPED: 'text-slate-500', NO_FRESH_FRAME: 'text-rose-300',
+  };
+
+  const predicted = unified?.prediction ?? 'WAIT';
+  const cardTone = predicted === 'UP'
+    ? 'border-emerald-400 bg-emerald-400/10 text-emerald-300'
+    : predicted === 'DOWN'
+      ? 'border-rose-400 bg-rose-400/10 text-rose-300'
+      : 'border-amber-400 bg-amber-400/10 text-amber-300';
 
   return <section className="mx-auto max-w-7xl p-5 lg:p-8">
     <div className="mb-4 border border-slate-800 bg-slate-900/70 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs font-semibold uppercase tracking-widest text-slate-400">Auto chart detection</p>
+        <p className="text-xs font-semibold uppercase tracking-widest text-slate-400">Auto chart detection (OCR from the current shared frame)</p>
         <span className="font-mono text-xs text-slate-500">{ocrBusy ? 'Reading chart header…' : active ? 'Scanning every 10s' : 'Idle — share your chart screen'}</span>
       </div>
+      {/* Detected identity vs manual fallback — shown separately, never conflated */}
       <div className="mt-2 grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
-        <div><p className="text-[10px] uppercase tracking-wider text-slate-500">Pair</p><p className="font-mono font-bold">{identity?.pair.pair ?? 'UNKNOWN'} <span className="text-[10px] text-slate-500">{identity ? `${identity.pair.confidence}%` : ''}</span></p></div>
-        <div><p className="text-[10px] uppercase tracking-wider text-slate-500">Market</p><p className="font-mono font-bold">{identity?.marketType.marketType ?? 'UNKNOWN'}</p></div>
-        <div><p className="text-[10px] uppercase tracking-wider text-slate-500">Timeframe</p><p className="font-mono font-bold">{identity?.timeframe.timeframe ?? 'UNKNOWN'} <span className="text-[10px] text-slate-500">{identity ? `${identity.timeframe.confidence}%` : ''}</span></p></div>
-        <div><p className="text-[10px] uppercase tracking-wider text-slate-500">Status</p><p className={`font-mono font-bold ${(identity?.pair.confidence ?? 0) >= 60 ? 'text-emerald-300' : 'text-amber-300'}`}>{!identity ? 'UNKNOWN' : (identity.pair.confidence >= 60 && identity.timeframe.confidence >= 60) ? 'VERIFIED' : 'ESTIMATED'}</p></div>
+        <div><p className="text-[10px] uppercase tracking-wider text-slate-500">Detected pair (OCR)</p><p className="font-mono font-bold">{identity?.pair.pair ?? 'UNKNOWN'} <span className="text-[10px] text-slate-500">{identity ? `${identity.pair.confidence}%` : ''}</span></p></div>
+        <div><p className="text-[10px] uppercase tracking-wider text-slate-500">Detected market</p><p className="font-mono font-bold">{identity?.marketType.marketType ?? 'UNKNOWN'}</p></div>
+        <div><p className="text-[10px] uppercase tracking-wider text-slate-500">Detected timeframe (OCR)</p><p className={`font-mono font-bold ${(identity?.timeframe.confidence ?? 0) >= 60 ? '' : 'text-amber-300'}`}>{identity?.timeframe.timeframe ?? 'UNKNOWN'}{identity && (identity.timeframe.confidence ?? 0) < 60 ? ' — MANUAL CONFIRMATION REQUIRED' : ''} <span className="text-[10px] text-slate-500">{identity ? `${identity.timeframe.confidence}%` : ''}</span></p></div>
+        <div><p className="text-[10px] uppercase tracking-wider text-slate-500">Manual selection (fallback, NOT detection)</p><p className="font-mono text-slate-400">{manualSymbol} · {manualTimeframe}</p></div>
       </div>
-      {identityChanges.length > 0 && <p className="mt-2 text-xs text-amber-300">⚠ {identityChanges.join(' · ')} — locked signal invalidated</p>}
+      {identityChanges.length > 0 && <p className="mt-2 text-xs text-amber-300">⚠ {identityChanges.join(' · ')} — analysis session reset (old candles discarded)</p>}
+      {ocrRawSample && <p className="mt-2 truncate font-mono text-[10px] text-slate-600" title={ocrRawSample}>OCR sample: {ocrRawSample}</p>}
     </div>
     <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
       <div><p className="font-mono text-[11px] uppercase tracking-[.24em] text-cyan-400">Local / deterministic / zero API keys</p><h2 className="mt-2 text-2xl font-bold tracking-tight">Algorithmic Trading &amp; Technical Analysis Terminal</h2></div>
       <div className="flex items-center gap-3">
+        <span className={`font-mono text-xs font-bold ${statusTone[status]}`}>● {statusLabel[status]}</span>
         {auto && <span className="font-mono text-xs text-cyan-300">Next candle close: {countdown}s</span>}
         <button onClick={() => setQuietMode((q) => !q)} className={`border px-3 py-2 text-sm font-semibold ${quietMode ? 'border-slate-600 bg-slate-800 text-slate-300' : 'border-cyan-400/40 bg-cyan-400/10 text-cyan-200'}`} title="Toggle sound & notification alerts">{quietMode ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}{quietMode ? 'Alerts off' : 'Alerts on'}</button>
         {active && auto && (
-          <button onClick={() => setPaused((value) => !value)} className={`border px-3 py-2 text-sm font-semibold ${paused ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200' : 'border-slate-600 bg-slate-800 text-slate-300'}`}>{paused ? '▶ Resume monitoring' : '⏸ Pause monitoring'}</button>
+          <button onClick={() => setPaused((value) => !value)} className={`border px-3 py-2 text-sm font-semibold ${paused ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200' : 'border-slate-600 bg-slate-800 text-slate-300'}`}>{paused ? <><Play className="mr-1 inline h-4 w-4" />Resume monitoring</> : <><Pause className="mr-1 inline h-4 w-4" />Pause monitoring</>}</button>
         )}
-        <button onClick={() => setAuto((value) => !value)} className={`border px-4 py-2 text-sm font-semibold ${auto ? 'border-rose-400/40 bg-rose-400/10 text-rose-200' : 'border-cyan-400/40 bg-cyan-400/10 text-cyan-200'}`}>{auto ? 'Stop auto-monitoring' : 'Start auto-monitoring'}</button>
+        <button onClick={() => void (auto ? (setAuto(false), setStatus(active ? 'RUNNING' : 'STOPPED')) : startAuto())} className={`border px-4 py-2 text-sm font-semibold ${auto ? 'border-rose-400/40 bg-rose-400/10 text-rose-200' : 'border-cyan-400/40 bg-cyan-400/10 text-cyan-200'}`}>{auto ? 'Stop auto-monitoring' : 'Start auto-monitoring'}</button>
         <button onClick={() => void run()} disabled={working} className="flex items-center gap-2 bg-cyan-400 px-4 py-2 text-sm font-bold text-slate-950 disabled:opacity-50"><Zap className="h-4 w-4" />{working ? 'Calculating…' : 'Analyse now'}</button>
       </div>
     </div>
@@ -318,127 +366,151 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
       </div>
     )}
     {lockedSignal && lockedSignal.signal !== 'WAIT' && lockedSignal.chartDetection.isChart && !flashNewCandle && (
-      <div className={`mb-4 border-2 p-4 ${badgeTone}`}><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-widest opacity-75">Signal locked at candle close — execute at next candle open</p><p className="mt-1 text-xl font-black tracking-wider">{lockedSignal.actionBadge}</p></div><div className="text-right"><p className="text-2xl font-black">{lockedSignal.confidenceScore}%</p><p className="font-mono text-xs opacity-75">Expiry: {lockedSignal.expiry.label}</p></div></div><p className="mt-2 font-mono text-xs opacity-75">Execution target: For Next Candle Opening (Expiry: {lockedSignal.expiry.candles}M based on wick/structure)</p></div>
+      <div className={`mb-4 border-2 p-4 ${badgeTone(lockedSignal.signal)}`}><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-widest opacity-75">Signal locked at candle close — execute at next candle open</p><p className="mt-1 text-xl font-black tracking-wider">{lockedSignal.actionBadge}</p></div><div className="text-right"><p className="text-2xl font-black">{lockedSignal.confidenceScore}%</p><p className="font-mono text-xs opacity-75">Expiry: {lockedSignal.expiry.label}</p></div></div><p className="mt-2 font-mono text-xs opacity-75">Execution target: For Next Candle Opening (Expiry: {lockedSignal.expiry.candles}M based on wick/structure)</p></div>
     )}
     {result && !result.chartDetection.isChart && (
       <div className="mb-4 flex items-start gap-3 border-2 border-amber-400 bg-amber-400/10 p-4 text-amber-200"><AlertTriangle className="mt-.5 h-6 w-6 shrink-0" /><div><p className="font-bold">No valid trading chart detected on shared screen</p><p className="mt-1 text-sm">Switch your screen share to the live Quotex chart window/tab, then let auto-monitoring re-validate the frame. No trading signals are generated from non-chart content.</p>{active && <p className="mt-1 font-mono text-xs">Validator score: {result.chartDetection.score}/100</p>}</div></div>
     )}
-    {flashNewCandle && result && result.signal !== 'WAIT' && (
-      <div className={`mb-4 animate-pulse border-2 p-4 text-center text-lg font-black tracking-widest ${badgeTone}`}>⚡ NEW CANDLE OPEN — {badgeLabel} · {result.confidenceScore}% confluence · For Next Candle Expiry</div>
+    {status === 'NO_FRESH_FRAME' && (
+      <div className="mb-4 border-2 border-rose-400 bg-rose-400/10 p-4 text-rose-200"><p className="font-bold">NO FRESH FRAME — live decisions are stale</p><p className="mt-1 text-sm">Last captured frame is {frameAgeSeconds}s old (limit {FRESH_FRAME_LIMIT_MS / 1000}s). Old decisions are no longer presented as current. Check that screen sharing is still active.</p></div>
     )}
-    {/* LEFT: screenshot capture panel · RIGHT: live analysis — Part 14 requirement */}
+    {flashNewCandle && unified && unified.prediction !== 'WAIT' && (
+      <div className={`mb-4 animate-pulse border-2 p-4 text-center text-lg font-black tracking-widest ${cardTone}`}>⚡ NEW CANDLE OPEN — {unified.prediction} · {unified.confluence}/100 confluence · For Next Candle Expiry</div>
+    )}
+    {/* LEFT: screenshot capture panel · RIGHT: live analysis */}
     <div className="grid gap-5 xl:grid-cols-[320px_1fr]">
       <ScreenshotCapturePanel sharedStream={stream} sharedVideo={video} />
-    <div className="grid gap-5 lg:grid-cols-[1.25fr_.75fr] min-w-0">
-      <div className="border border-slate-800 bg-slate-900/70 p-5"><div className="flex items-center justify-between border-b border-slate-800 pb-3"><span className="text-sm font-semibold">Chart frame input</span><span className="font-mono text-xs text-slate-400">{selectedSymbol} · {selectedTimeframe}{auto ? ' · continuous scan active' : ''}</span></div>
-        <div className="relative mt-4 grid aspect-video place-items-center overflow-hidden border border-slate-800 bg-slate-950"><video ref={video} autoPlay muted className={active ? 'h-full w-full object-contain' : 'hidden'} />{!active && <div className="text-center text-slate-500"><Camera className="mx-auto mb-2 h-8 w-8" /><p className="text-sm">Optional local screen frame</p><p className="mt-1 text-xs">Pixels never leave this terminal.</p></div>}</div>
-        <div className="mt-4 flex flex-wrap gap-3"><button onClick={active ? stop : start} className="flex items-center gap-2 border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium">{active ? <Square className="h-4 w-4" /> : <Camera className="h-4 w-4" />}{active ? 'Stop screen share' : 'Share chart screen'}</button>{lastCaptureAt && <span className="self-center font-mono text-xs text-emerald-400">Last frame captured {Math.round((Date.now() - lastCaptureAt) / 1000)}s ago</span>}</div>
-      </div>
-      <div className="border border-slate-800 bg-slate-900/70 p-5"><p className="text-xs font-semibold uppercase tracking-widest text-slate-400">Signal output · for next candle expiry</p>
-        <div className={`mt-4 border p-5 text-center ${badgeTone}`}>
-          <div className="text-3xl font-black tracking-[.12em]">{badgeLabel}</div>
-          <div className="mt-2 font-mono text-sm">{result ? `${result.confidenceScore}% confluence` : 'Awaiting analysis'}</div>
-          <div className="mt-1 font-mono text-xs">{result ? `Recommended expiry: ${result.expiry.label} (${result.expiry.candles > 0 ? `${result.expiry.candles} candle${result.expiry.candles > 1 ? 's' : ''}` : 'stand aside'})` : ''}</div>
-          {result && <div className="mt-1 font-mono text-[11px] opacity-75">Opportunity gate: {result.confidenceScore >= 60 ? '✓' : '✗'} 60/100 required · {result.setup.classification} (MTG req: {result.mtg.requiredConfluence}%)</div>}
+      <div className="grid gap-5 lg:grid-cols-[1.25fr_.75fr] min-w-0">
+        <div className="border border-slate-800 bg-slate-900/70 p-5">
+          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+            <span className="text-sm font-semibold">Live chart preview (actual shared frames)</span>
+            <span className={`flex items-center gap-1.5 font-mono text-xs ${frameFresh ? 'text-emerald-300' : 'text-slate-500'}`}>
+              <span className={`inline-block h-2 w-2 rounded-full ${frameFresh ? 'animate-pulse bg-emerald-400' : 'bg-slate-600'}`} />
+              {active ? (frameFresh ? 'LIVE FRAME' : 'STALE FRAME') : 'NOT SHARING'}
+            </span>
+          </div>
+          <div className="relative mt-4 grid aspect-video place-items-center overflow-hidden border border-slate-800 bg-slate-950">
+            <video ref={video} autoPlay muted className={active ? 'h-full w-full object-contain' : 'hidden'} />
+            {!active && <div className="text-center text-slate-500"><Camera className="mx-auto mb-2 h-8 w-8" /><p className="text-sm">Start screen sharing to see the live chart here.</p><p className="mt-1 text-xs">The preview always renders the current shared stream — never a stored screenshot.</p></div>}
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-2 font-mono text-[11px] text-slate-400">
+            <span>Last frame: {lastCaptureAt ? new Date(lastCaptureAt).toLocaleTimeString() : '—'}</span>
+            <span>Frame age: {frameAgeSeconds !== null ? `${frameAgeSeconds}s` : '—'}{frameAgeSeconds !== null && !frameFresh ? ' (STALE)' : ''}</span>
+            <span>Capture resolution: {captureResolution ?? '—'}</span>
+            <span>Frames captured: {framesCaptured}</span>
+            <span>Processing: {working ? 'analyzing…' : decision || unified ? 'complete' : 'waiting for frames'}</span>
+            <span>Status: <span className={statusTone[status]}>{statusLabel[status]}</span></span>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-3">
+            <button onClick={active ? stop : () => void start()} className="flex items-center gap-2 border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium">{active ? <Square className="h-4 w-4" /> : <Camera className="h-4 w-4" />}{active ? 'Stop screen share' : 'Share chart screen'}</button>
+            <button onClick={() => setPreviewZoom((z) => !z)} disabled={!active} className="flex items-center gap-2 border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium disabled:opacity-40"><Maximize2 className="h-4 w-4" />Fullscreen</button>
+          </div>
+          {previewZoom && active && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/95 p-8" onClick={() => setPreviewZoom(false)}>
+              <video ref={video} autoPlay muted className="max-h-full max-w-full object-contain" />
+            </div>
+          )}
         </div>
-        {result && (
-          <div className={`mt-3 border p-3 text-xs ${result.mtg.level !== 'BASE' ? 'border-amber-400/40 bg-amber-400/10 text-amber-200' : 'border-slate-700 bg-slate-950 text-slate-400'}`}>
-            <span className="flex items-center gap-2 font-bold"><AlertTriangle className="h-4 w-4" />MTG STATUS: {result.mtg.level.replace('_', ' ')}</span>
-            <p className="mt-1 font-mono">Recovery target: {result.mtg.recoveryTarget} units · Stake multiplier: {result.mtg.stakeMultiplier}x · Required confluence: {result.mtg.requiredConfluence}%</p>
-            {result.mtg.riskWarning && <p className="mt-1">{result.mtg.riskWarning}</p>}
+        {/* CLEAN SIGNAL CARD — single authoritative result, no strict-math rejection walls */}
+        <div className="border border-slate-800 bg-slate-900/70 p-5">
+          <p className="text-xs font-semibold uppercase tracking-widest text-slate-400">NEXT CANDLE PREDICTION</p>
+          <div className={`mt-4 border p-5 text-center ${cardTone}`}>
+            <div className="text-4xl font-black tracking-[.12em]">{unified ? unified.prediction : 'WAIT'}</div>
+            <div className="mt-2 font-mono text-sm">Confidence: {unified ? `${unified.predictionConfidence}%` : '—'}{unified && unified.prediction !== 'WAIT' ? '' : ''}</div>
+            <div className="mt-1 font-mono text-xs">Confluence: {unified ? `${unified.confluence}/100` : '—'} <span className="opacity-60">(evidence score, not win probability)</span></div>
           </div>
-        )}
-        {result && (
-          <div className="mt-5 grid grid-cols-2 gap-px overflow-hidden border border-slate-800 bg-slate-800">
-            <Metric label="RSI (14)" value={`${result.rsiValue?.toFixed(1) ?? '—'}${result.rsiZone ? ` · ${result.rsiZone}` : ''}`} />
-            <Metric label="Bollinger position" value={`${result.bollinger ? `${result.bollinger.status.replace('_', ' ')} @ ${(result.bollinger.proximity * 100).toFixed(0)}%` : '—'}`} />
-            <Metric label="Bollinger bandwidth" value={result.bollinger ? `${(result.bollinger.bandwidth * 100).toFixed(2)}%` : '—'} />
-            <Metric label="Body ratio" value={`${((result.candle?.bodyRatio ?? 0) * 100).toFixed(1)}%`} />
-            <Metric label="Upper / lower wick" value={`${((result.candle?.upperWickRatio ?? 0) * 100).toFixed(0)}% / ${((result.candle?.lowerWickRatio ?? 0) * 100).toFixed(0)}%`} />
-            <Metric label="Wick rejection" value={result.candle?.rejection ?? '—'} />
-            <Metric label="Momentum" value={result.candle?.momentum ?? '—'} />
-            <Metric label="Candle pattern" value={result.pattern?.pattern.replace('_', ' ') ?? '—'} />
-            <Metric label="Buyer / seller pressure" value={result.pattern ? `${result.pattern.pressure.dominant} (${result.pattern.pressure.strength}%)` : '—'} />
-            <Metric label="Next-candle prediction" value={result.nextCandlePrediction.prediction.replace(/_/g, ' ')} />
-            <Metric label="Trend filter" value={result.trendFilter} />
+          <div className="mt-4 space-y-1 text-xs text-slate-300">
+            <p>Trend: <span className="font-bold text-slate-100">{decision?.trend ?? '—'}</span></p>
+            <p>Detected pair: <span className="font-bold text-slate-100">{identity?.pair.pair ?? 'UNKNOWN'}</span></p>
+            <p>Market: <span className="font-bold text-slate-100">{identity?.marketType.marketType ?? 'UNKNOWN'}</span></p>
+            <p>Timeframe: <span className={`font-bold ${(identity?.timeframe.confidence ?? 0) >= 60 ? 'text-slate-100' : 'text-amber-300'}`}>{identity?.timeframe.timeframe ?? 'UNKNOWN'}{identity && (identity.timeframe.confidence ?? 0) < 60 ? ' — MANUAL CONFIRMATION REQUIRED' : ''}</span></p>
+            <p>Next candle start: <span className="text-slate-100">{unifiedTiming ? new Date(unifiedTiming.nextCandleStart).toLocaleTimeString() : '—'}</span></p>
+            <p>Next candle expiry: <span className="text-slate-100">{unifiedTiming ? new Date(unifiedTiming.nextCandleExpiry).toLocaleTimeString() : '—'}</span></p>
           </div>
-        )}
+          {unified && (
+            <div className="mt-4">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500">Main reasons</p>
+              <ul className="mt-1 list-disc space-y-0.5 pl-4 text-xs text-slate-300">
+                {unified.supportingEvidence.slice(0, 5).map((e, i) => <li key={i}>{e.note}</li>)}
+                {unified.supportingEvidence.length === 0 && <li className="text-slate-500">{unified.waitReason ?? 'Insufficient evidence'}</li>}
+              </ul>
+              {unified.waitReason && <p className="mt-2 border border-amber-400/40 bg-amber-400/10 p-2 text-xs text-amber-200">WAIT — {unified.waitReason}</p>}
+            </div>
+          )}
+          {!unified && !working && <p className="mt-4 text-sm text-slate-500">Awaiting live frames — the authoritative prediction appears once at least 3 completed candles are readable from the shared chart.</p>}
+          {/* Candle-extraction diagnostics — visibility, not decision logic */}
+          {result && (
+            <details className="mt-4 border border-slate-800 bg-slate-950 p-3 text-xs">
+              <summary className="cursor-pointer font-semibold text-slate-400">Diagnostics (chart rectangle, candles, OCR, indicators)</summary>
+              <div className="mt-2 grid grid-cols-2 gap-1 font-mono text-[11px] text-slate-400">
+                <span>Chart valid: {String(result.chartDetection.isChart)} ({result.chartDetection.score}/100)</span>
+                <span>Validator: {result.chartDetection.reason.slice(0, 40)}</span>
+                <span>Candles reconstructed: {result.reconstructedCandleCount ?? 0}</span>
+                <span>Reconstruction quality: {result.reconstructionQuality ?? '—'}</span>
+                <span>Last body ratio: {result.candle ? `${(result.candle.bodyRatio * 100).toFixed(0)}%` : '—'}</span>
+                <span>Upper/lower wick: {result.candle ? `${(result.candle.upperWickRatio * 100).toFixed(0)}%/${(result.candle.lowerWickRatio * 100).toFixed(0)}%` : '—'}</span>
+                <span>RSI: {result.rsiValue !== undefined ? result.rsiValue.toFixed(1) : 'unavailable (needs 15+ closes)'}</span>
+                <span>Bollinger: {result.bollinger ? 'available' : 'unavailable (needs 20+ closes)'}</span>
+                <span>Pattern: {result.pattern?.pattern ?? '—'}</span>
+                <span>Momentum: {result.candle?.momentum ?? '—'}</span>
+              </div>
+            </details>
+          )}
+        </div>
       </div>
     </div>
-    </div>
-    {error && <p className="mt-4 border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200">{error}</p>}
-    {/* AUTHORITATIVE unified decision — the single consistent live result */}
-    {unified && <article className="mt-5 border-2 border-emerald-400 bg-slate-900/70 p-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-sm font-semibold"><Activity className="h-4 w-4 text-emerald-300" />Authoritative Decision Engine — LIVE SCREEN SHARE</div>
-        <span className="font-mono text-xs text-slate-500">SOURCE: LIVE SCREEN SHARE · v{unified.algorithmVersion}</span>
-      </div>
-      <div className="mt-3 grid gap-3 md:grid-cols-4">
-        <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Main signal</p><p className={`mt-1 font-mono text-xl font-black ${unified.mainSignal === 'UP' ? 'text-emerald-300' : unified.mainSignal === 'DOWN' ? 'text-rose-300' : 'text-amber-300'}`}>{unified.mainSignal}</p></div>
-        <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Prediction</p><p className={`mt-1 font-mono text-xl font-black ${unified.prediction === 'UP' ? 'text-emerald-300' : unified.prediction === 'DOWN' ? 'text-rose-300' : 'text-amber-300'}`}>{unified.prediction}</p></div>
-        <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Prediction confidence</p><p className="mt-1 font-mono text-xl font-black">{unified.predictionConfidence}%</p></div>
-        <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Confluence (evidence, not win prob.)</p><p className="mt-1 font-mono text-xl font-black">{unified.confluence}/100</p></div>
-      </div>
-      <p className="mt-2 font-mono text-xs text-slate-400">Classification: {unified.classification}{unified.qualified ? ' · QUALIFIED OPPORTUNITY' : ''} · Data quality: {unified.dataQuality} · {unified.candlesAnalyzed} completed candles</p>
-      {unifiedTiming && <div className="mt-2 grid grid-cols-2 gap-2 font-mono text-[11px] text-slate-300 md:grid-cols-4">
-        <span className="border border-slate-700 px-2 py-1">CURRENT CANDLE START: {new Date(unifiedTiming.candleStart).toLocaleTimeString()}</span>
-        <span className="border border-slate-700 px-2 py-1">TIMEFRAME: {unifiedTiming.timeframe}</span>
-        <span className="border border-amber-400/40 px-2 py-1 text-amber-200">CLOSE COUNTDOWN: {unifiedTiming.secondsToClose}s</span>
-        <span className="border border-slate-700 px-2 py-1">NEXT CANDLE EXPIRY: {new Date(unifiedTiming.nextCandleExpiry).toLocaleTimeString()}</span>
-      </div>}
-      <div className="mt-3 grid gap-3 md:grid-cols-2 text-[11px]">
-        <div><p className="font-bold text-emerald-300">Supporting evidence</p><ul className="mt-1 space-y-0.5 font-mono text-slate-400">{unified.supportingEvidence.map((e, i) => <li key={i}>[{e.family}] {e.note} ({e.strength})</li>)}</ul></div>
-        <div><p className="font-bold text-rose-300">Opposing evidence</p><ul className="mt-1 space-y-0.5 font-mono text-slate-400">{unified.opposingEvidence.length === 0 ? <li>none</li> : unified.opposingEvidence.map((e, i) => <li key={i}>[{e.family}] {e.note} ({e.strength})</li>)}</ul></div>
-      </div>
-      {unified.disagreeingFamilies.length > 0 && <p className="mt-2 font-mono text-[11px] text-amber-300">Families in disagreement: {unified.disagreeingFamilies.join(', ')}</p>}
-      {unified.waitReason && <p className="mt-2 border border-amber-400/40 bg-amber-400/10 p-2 text-xs text-amber-200">WAIT reason: {unified.waitReason}</p>}
-    </article>}
-    {decision && <article className="mt-5 border-l-2 border-violet-400 bg-slate-900/70 p-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-sm font-semibold"><Activity className="h-4 w-4 text-violet-300" />Signal Provider Intelligence — supplementary family-vote breakdown (subordinate to the authoritative engine)</div>
-        <span className="font-mono text-xs text-slate-500">{decision.candlesAnalyzed} completed candles · v{decision.analysisVersion}</span>
-      </div>
-      <div className="mt-3 grid gap-3 md:grid-cols-4">
-        <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Prediction</p><p className={`mt-1 font-mono text-xl font-black ${decision.prediction === 'UP' ? 'text-emerald-300' : decision.prediction === 'DOWN' ? 'text-rose-300' : 'text-amber-300'}`}>{decision.prediction}</p></div>
-        <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Prediction confidence</p><p className="mt-1 font-mono text-xl font-black">{decision.predictionConfidence}%</p></div>
-        <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Confluence</p><p className="mt-1 font-mono text-xl font-black">{decision.confluenceScore}/100</p></div>
-        <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Classification</p><p className="mt-1 font-mono text-sm font-bold text-slate-200">{decision.classification}{decision.qualified ? ' · QUALIFIED' : ''}</p></div>
-      </div>
-      <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-mono">
-        <span className="border border-emerald-400/40 px-2 py-1 text-emerald-300">Bullish {decision.bullishScore}</span>
-        <span className="border border-rose-400/40 px-2 py-1 text-rose-300">Bearish {decision.bearishScore}</span>
-        <span className="border border-slate-700 px-2 py-1 text-slate-300">Trend: {decision.trend}</span>
-        <span className="border border-slate-700 px-2 py-1 text-slate-300">Pattern: {decision.patternName.replace(/_/g, ' ').toLowerCase()}</span>
-        <span className="border border-slate-700 px-2 py-1 text-slate-300">Data quality: {decision.dataQuality}</span>
-      </div>
-      <div className="mt-3 grid gap-3 md:grid-cols-3 text-[11px]">
-        <div><p className="font-bold text-emerald-300">Supporting (UP)</p><ul className="mt-1 space-y-0.5 font-mono text-slate-400">{decision.bullishVotes.map((v) => <li key={v.strategy}>{v.strategy}: {v.evidence} ({v.strength})</li>)}</ul></div>
-        <div><p className="font-bold text-rose-300">Opposing (DOWN)</p><ul className="mt-1 space-y-0.5 font-mono text-slate-400">{decision.bearishVotes.map((v) => <li key={v.strategy}>↳ {v.evidence}</li>)}</ul></div>
-        <div><p className="font-bold text-slate-300">Neutral / indecisive</p><ul className="mt-1 space-y-0.5 font-mono text-slate-500">{decision.neutralVotes.map((v) => <li key={v.strategy}>{v.strategy}: {v.evidence}</li>)}</ul></div>
-      </div>
-      <p className="mt-3 text-sm leading-6 text-slate-300">{decision.explanation}</p>
-      {decision.waitReason && <p className="mt-2 border border-amber-400/40 bg-amber-400/10 p-2 text-xs text-amber-200">WAIT reason: {decision.waitReason}</p>}
-    </article>}
-    {result && <article className="mt-5 border-l-2 border-cyan-400 bg-slate-900/70 p-5"><div className="flex items-center gap-2 text-sm font-semibold"><Activity className="h-4 w-4 text-cyan-300" />Strict mathematical reasoning · confluence breakdown</div>
-      <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-mono">
-        <span className={`border px-2 py-1 ${result.confluence.rsiExtreme ? 'border-emerald-400 text-emerald-300' : 'border-slate-700 text-slate-500'}`}>RSI extreme (supporting, not required): {result.confluence.rsiExtreme ? 'YES' : 'NO'}</span>
-        <span className={`border px-2 py-1 ${result.confluence.bollingerBoundaryTouch ? 'border-emerald-400 text-emerald-300' : 'border-slate-700 text-slate-500'}`}>BB boundary touch: {result.confluence.bollingerBoundaryTouch ? 'YES' : 'NO'}</span>
-        <span className={`border px-2 py-1 ${result.confluence.rejectionWickStrong ? 'border-emerald-400 text-emerald-300' : 'border-slate-700 text-slate-500'}`}>Strong rejection wick: {result.confluence.rejectionWickStrong ? 'YES' : 'NO'}</span>
-        <span className={`border px-2 py-1 ${result.confluence.momentumAligned ? 'border-emerald-400 text-emerald-300' : 'border-slate-700 text-slate-500'}`}>Momentum aligned: {result.confluence.momentumAligned ? 'YES' : 'NO'}</span>
-        <span className="border border-slate-700 px-2 py-1 text-slate-300">Weighted score: {result.confluence.score}%</span>
-      </div>
-      <p className="mt-2 font-mono text-xs text-cyan-300">Setup classification: {result.setup.classification} · {result.setup.independentEvidenceCount} independent evidence sources</p>
-      {result.setup.wait && <p className="mt-2 border border-amber-400/40 bg-amber-400/10 p-2 text-xs text-amber-200">WAIT — {result.setup.wait.category}: {result.setup.wait.blockingCondition} Missing: {result.setup.wait.missingData} Would qualify with: {result.setup.wait.requiredConfirmation}</p>}
-      <p className="mt-3 text-sm leading-6 text-slate-300">{result.reasoning || result.summaryReason}</p>
-      <p className="mt-2 font-mono text-xs text-slate-400">{result.candleObservation}</p>
-      <p className="mt-2 font-mono text-xs text-slate-500">{result.expiry.rationale}</p>
-      {result.pattern && <p className="mt-2 font-mono text-xs text-slate-500">{result.pattern.description}</p>}
-      {result.nextCandlePrediction.prediction !== 'NONE' && <p className="mt-2 text-sm text-cyan-300">🔮 Prediction: {result.nextCandlePrediction.rationale}</p>}
-    </article>}
+      {error && <p className="mt-4 border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200">{error}</p>}
+      {/* AUTHORITATIVE unified decision — evidence breakdown (single consistent result) */}
+      {unified && <article className="mt-5 border-2 border-emerald-400 bg-slate-900/70 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-sm font-semibold"><Activity className="h-4 w-4 text-emerald-300" />Authoritative Decision Engine — LIVE SCREEN SHARE</div>
+          <span className="font-mono text-xs text-slate-500">SOURCE: LIVE SCREEN SHARE · v{unified.algorithmVersion}</span>
+        </div>
+        <div className="mt-3 grid gap-3 md:grid-cols-4">
+          <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Main signal</p><p className={`mt-1 font-mono text-xl font-black ${unified.mainSignal === 'UP' ? 'text-emerald-300' : unified.mainSignal === 'DOWN' ? 'text-rose-300' : 'text-amber-300'}`}>{unified.mainSignal}</p></div>
+          <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Prediction</p><p className={`mt-1 font-mono text-xl font-black ${unified.prediction === 'UP' ? 'text-emerald-300' : unified.prediction === 'DOWN' ? 'text-rose-300' : 'text-amber-300'}`}>{unified.prediction}</p></div>
+          <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Prediction confidence</p><p className="mt-1 font-mono text-xl font-black">{unified.predictionConfidence}%</p></div>
+          <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Confluence (evidence, not win prob.)</p><p className="mt-1 font-mono text-xl font-black">{unified.confluence}/100</p></div>
+        </div>
+        <p className="mt-2 font-mono text-xs text-slate-400">Classification: {unified.classification}{unified.qualified ? ' · QUALIFIED OPPORTUNITY' : ''} · Data quality: {unified.dataQuality} · {unified.candlesAnalyzed} completed candles</p>
+        {unifiedTiming && <div className="mt-2 grid grid-cols-2 gap-2 font-mono text-[11px] text-slate-300 md:grid-cols-4">
+          <span className="border border-slate-700 px-2 py-1">CURRENT CANDLE START: {new Date(unifiedTiming.candleStart).toLocaleTimeString()}</span>
+          <span className="border border-slate-700 px-2 py-1">TIMEFRAME: {unifiedTiming.timeframe}</span>
+          <span className="border border-amber-400/40 px-2 py-1 text-amber-200">CLOSE COUNTDOWN: {unifiedTiming.secondsToClose}s</span>
+          <span className="border border-slate-700 px-2 py-1">NEXT CANDLE EXPIRY: {new Date(unifiedTiming.nextCandleExpiry).toLocaleTimeString()}</span>
+        </div>}
+        <div className="mt-3 grid gap-3 md:grid-cols-2 text-[11px]">
+          <div><p className="font-bold text-emerald-300">Supporting evidence</p><ul className="mt-1 space-y-0.5 font-mono text-slate-400">{unified.supportingEvidence.map((e, i) => <li key={i}>[{e.family}] {e.note} ({e.strength})</li>)}</ul></div>
+          <div><p className="font-bold text-rose-300">Opposing evidence</p><ul className="mt-1 space-y-0.5 font-mono text-slate-400">{unified.opposingEvidence.length === 0 ? <li>none</li> : unified.opposingEvidence.map((e, i) => <li key={i}>[{e.family}] {e.note} ({e.strength})</li>)}</ul></div>
+        </div>
+        {unified.disagreeingFamilies.length > 0 && <p className="mt-2 font-mono text-[11px] text-amber-300">Families in disagreement: {unified.disagreeingFamilies.join(', ')}</p>}
+        {unified.waitReason && <p className="mt-2 border border-amber-400/40 bg-amber-400/10 p-2 text-xs text-amber-200">WAIT reason: {unified.waitReason}</p>}
+      </article>}
+      {/* Supplementary SPI family-vote breakdown — collapsed, subordinate */}
+      {decision && <details className="mt-5 border-l-2 border-violet-400 bg-slate-900/70 p-5">
+        <summary className="cursor-pointer text-sm font-semibold"><Activity className="mr-2 inline h-4 w-4 text-violet-300" />Signal Provider Intelligence — family-vote breakdown (subordinate)</summary>
+        <div className="mt-3 grid gap-3 md:grid-cols-4">
+          <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Prediction</p><p className={`mt-1 font-mono text-xl font-black ${decision.prediction === 'UP' ? 'text-emerald-300' : decision.prediction === 'DOWN' ? 'text-rose-300' : 'text-amber-300'}`}>{decision.prediction}</p></div>
+          <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Confidence</p><p className="mt-1 font-mono text-xl font-black">{decision.predictionConfidence}%</p></div>
+          <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Confluence</p><p className="mt-1 font-mono text-xl font-black">{decision.confluenceScore}/100</p></div>
+          <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Classification</p><p className="mt-1 font-mono text-sm font-bold text-slate-200">{decision.classification}{decision.qualified ? ' · QUALIFIED' : ''}</p></div>
+        </div>
+        <div className="mt-3 grid gap-3 md:grid-cols-3 text-[11px]">
+          <div><p className="font-bold text-emerald-300">Supporting (UP)</p><ul className="mt-1 space-y-0.5 font-mono text-slate-400">{decision.bullishVotes.map((v) => <li key={v.strategy}>{v.strategy}: {v.evidence} ({v.strength})</li>)}</ul></div>
+          <div><p className="font-bold text-rose-300">Opposing (DOWN)</p><ul className="mt-1 space-y-0.5 font-mono text-slate-400">{decision.bearishVotes.map((v) => <li key={v.strategy}>↳ {v.evidence}</li>)}</ul></div>
+          <div><p className="font-bold text-slate-300">Neutral / indecisive</p><ul className="mt-1 space-y-0.5 font-mono text-slate-500">{decision.neutralVotes.map((v) => <li key={v.strategy}>{v.strategy}: {v.evidence}</li>)}</ul></div>
+        </div>
+      {/* The old strict-mathematical-reasoning panel was REMOVED — the authoritative unified engine is the sole decision source. */}
+      </details>}
     <canvas ref={canvas} className="hidden" />
   </section>;
 };
-const Metric = ({ label, value }: { label: string; value: string }) => <div className="bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">{label}</p><p className="mt-1 font-mono text-xs font-bold text-slate-200">{value}</p></div>;
+function badgeTone(signal: string): string {
+  return signal === 'CALL' ? 'border-emerald-400 bg-emerald-400/10 text-emerald-300'
+    : signal === 'PUT' ? 'border-rose-400 bg-rose-400/10 text-rose-300'
+      : 'border-amber-400 bg-amber-400/10 text-amber-300';
+}
+
 
 /**
  * Left-side screenshot capture panel (Part 14). Captures the CURRENT frame from
@@ -464,7 +536,6 @@ const ScreenshotCapturePanel: React.FC<{ sharedStream: React.RefObject<MediaStre
     const pixels = ctx.getImageData(0, 0, 320, 180).data;
     const greenish = (i: number) => pixels[i + 1] > pixels[i] * 1.1 && pixels[i + 1] > pixels[i + 2] * 1.1;
     const reddish = (i: number) => pixels[i] > pixels[i + 1] * 1.1 && pixels[i] > pixels[i + 2] * 1.1;
-    // 'Capture Current Chart': tightest crop containing candle-coloured pixels.
     let x0 = 0, y0 = 0, x1 = c.width, y1 = c.height;
     if (chartCrop) {
       x0 = c.width; y0 = c.height; x1 = 0; y1 = 0;
@@ -491,12 +562,9 @@ const ScreenshotCapturePanel: React.FC<{ sharedStream: React.RefObject<MediaStre
     if (!shotUrl) { setSendErr('Capture a screenshot first.'); return; }
     setSending(true); setSendErr(''); setSentNote('');
     try {
-      // Re-read the exact captured pixels from the stored image and run the
-      // independent screenshot analysis (same endpoint used by Screenshot Lab).
       const img = new Image();
       img.src = shotUrl;
       await img.decode();
-      // High-res analysis copy; JPEG transport keeps the upload ~100–200KB.
       const W = Math.min(1600, Math.max(320, img.naturalWidth || 960));
       const H = Math.min(900, Math.max(180, Math.round((img.naturalHeight / Math.max(img.naturalWidth, 1)) * W)));
       const c = document.createElement('canvas'); c.width = W; c.height = H;
@@ -509,7 +577,7 @@ const ScreenshotCapturePanel: React.FC<{ sharedStream: React.RefObject<MediaStre
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source: 'LIVE_CAPTURE', width: img.naturalWidth || W, height: img.naturalHeight || H, result: analysis }),
       });
-      setSentNote(`Independently analysed & saved (${analysis.signal} · ${analysis.confidenceScore}% · ${analysis.setup.classification}). Open the Screenshot Lab tab for the full result and history.`);
+      setSentNote(`Independently analysed & saved (${analysis.signal} · ${analysis.confidenceScore}%). Open the Screenshot Lab tab for the full result and history.`);
     } catch (e) {
       setSendErr(e instanceof Error ? e.message : 'Failed to send screenshot.');
     } finally { setSending(false); }
