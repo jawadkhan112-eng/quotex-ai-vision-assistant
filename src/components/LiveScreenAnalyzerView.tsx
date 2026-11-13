@@ -3,6 +3,7 @@ import { Activity, Camera, Square, Zap, AlertTriangle, Timer, Volume2, VolumeX, 
 import type { AlgoAnalysisResult as ShotAnalysisResult } from '../types';
 import type { AlgoAnalysisResult } from '../types';
 import type { ProviderDecision } from '../../server/modules/signalProviderIntelligence';
+import type { UnifiedDecision } from '../../server/unifiedDecisionEngine';
 import { alertManager } from '../services/alertManager';
 import { safeFetchJson, analyzeFrameViaJpeg } from '../services/safeFetch';
 import { detectChartIdentity, disposeOcr } from '../services/chartIdentityService';
@@ -40,6 +41,9 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
   // Signal Provider Intelligence: candle-by-candle UP/DOWN/WAIT decision state.
   const [decision, setDecision] = useState<ProviderDecision | null>(null);
   const [decisionBusy, setDecisionBusy] = useState(false);
+  // Unified authoritative decision — the ONE consistent result shown in the live panel.
+  const [unified, setUnified] = useState<UnifiedDecision | null>(null);
+  const [unifiedTiming, setUnifiedTiming] = useState<{ secondsToClose: number; nextCandleStart: number; nextCandleExpiry: number; candleStart: number; candleClose: number; timeframe: string } | null>(null);
 
   useEffect(() => {
     if (active && video.current && stream.current) video.current.srcObject = stream.current;
@@ -63,7 +67,7 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
       });
       if (res.ok && res.data?.success && res.data.decision) {
         setDecision(res.data.decision);
-        // Persist with dedup (asset|market|timeframe|targetCandle|version) — one decision per analysis context.
+        // Persist with dedup (source|asset|market|timeframe|targetCandle|version) — one decision per analysis context.
         void safeFetchJson('/api/decisions', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ decision: res.data.decision, meta: { ...res.data.meta, targetCandle: Date.now() } }),
@@ -71,6 +75,32 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
       }
     } catch { /* decision is supplementary; analysis result remains authoritative */ }
     finally { setDecisionBusy(false); }
+  }, [identity]);
+
+  /**
+   * Unified authoritative decision — same candles as SPI, ONE consistent result.
+   * LIVE source tag guarantees the screenshot pipeline's decisions stay separate.
+   */
+  const runUnified = useCallback(async (analysis: AlgoAnalysisResult) => {
+    const reconstructed = (analysis as { reconstructedCandles?: Array<{ open: number; high: number; low: number; close: number }> }).reconstructedCandles ?? [];
+    if (reconstructed.length < 3) { setUnified(null); return; }
+    try {
+      const res = await safeFetchJson<{ success: boolean; decision?: UnifiedDecision; timing?: typeof unifiedTiming; error?: string }>('/api/unified-decision', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          completed: reconstructed.map((c) => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
+          window: reconstructed.length >= 10 ? 10 : 5,
+          asset: identity?.pair.pair ?? analysis.detectedAsset ?? 'UNKNOWN',
+          marketType: identity?.marketType.marketType ?? 'UNKNOWN',
+          timeframe: identity?.timeframe.timeframe ?? analysis.detectedTimeframe ?? 'UNKNOWN',
+          source: 'LIVE',
+        }),
+      });
+      if (res.ok && res.data?.success && res.data.decision) {
+        setUnified(res.data.decision);
+        setUnifiedTiming(res.data.timing ?? null);
+      }
+    } catch { /* unified is supplementary; never breaks live monitoring */ }
   }, [identity]);
 
   const run = useCallback(async () => {
@@ -104,9 +134,11 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
       // Chain into the Signal Provider Intelligence engine using the real
       // reconstructed candle geometry — a decision for EVERY analysis pass.
       void runDecision(data.result!);
+      // One authoritative unified decision per analysis pass.
+      void runUnified(data.result!);
     } catch (caught) { setError(caught instanceof Error ? caught.message : 'Local analysis failed.'); }
     finally { setWorking(false); }
-  }, [active, paused, selectedSymbol, selectedTimeframe, runDecision]);
+  }, [active, paused, selectedSymbol, selectedTimeframe, runDecision, runUnified]);
 
   // Chart identity detection: throttled OCR pass on the shared frame. Runs only
   // when a canvas frame exists; identity change invalidates the locked signal.
@@ -335,9 +367,35 @@ export const LiveScreenAnalyzerView: React.FC<Props> = ({ selectedSymbol, select
     </div>
     </div>
     {error && <p className="mt-4 border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200">{error}</p>}
+    {/* AUTHORITATIVE unified decision — the single consistent live result */}
+    {unified && <article className="mt-5 border-2 border-emerald-400 bg-slate-900/70 p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-sm font-semibold"><Activity className="h-4 w-4 text-emerald-300" />Authoritative Decision Engine — LIVE SCREEN SHARE</div>
+        <span className="font-mono text-xs text-slate-500">SOURCE: LIVE SCREEN SHARE · v{unified.algorithmVersion}</span>
+      </div>
+      <div className="mt-3 grid gap-3 md:grid-cols-4">
+        <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Main signal</p><p className={`mt-1 font-mono text-xl font-black ${unified.mainSignal === 'UP' ? 'text-emerald-300' : unified.mainSignal === 'DOWN' ? 'text-rose-300' : 'text-amber-300'}`}>{unified.mainSignal}</p></div>
+        <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Prediction</p><p className={`mt-1 font-mono text-xl font-black ${unified.prediction === 'UP' ? 'text-emerald-300' : unified.prediction === 'DOWN' ? 'text-rose-300' : 'text-amber-300'}`}>{unified.prediction}</p></div>
+        <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Prediction confidence</p><p className="mt-1 font-mono text-xl font-black">{unified.predictionConfidence}%</p></div>
+        <div className="border border-slate-800 bg-slate-950 p-3"><p className="text-[10px] uppercase tracking-wider text-slate-500">Confluence (evidence, not win prob.)</p><p className="mt-1 font-mono text-xl font-black">{unified.confluence}/100</p></div>
+      </div>
+      <p className="mt-2 font-mono text-xs text-slate-400">Classification: {unified.classification}{unified.qualified ? ' · QUALIFIED OPPORTUNITY' : ''} · Data quality: {unified.dataQuality} · {unified.candlesAnalyzed} completed candles</p>
+      {unifiedTiming && <div className="mt-2 grid grid-cols-2 gap-2 font-mono text-[11px] text-slate-300 md:grid-cols-4">
+        <span className="border border-slate-700 px-2 py-1">CURRENT CANDLE START: {new Date(unifiedTiming.candleStart).toLocaleTimeString()}</span>
+        <span className="border border-slate-700 px-2 py-1">TIMEFRAME: {unifiedTiming.timeframe}</span>
+        <span className="border border-amber-400/40 px-2 py-1 text-amber-200">CLOSE COUNTDOWN: {unifiedTiming.secondsToClose}s</span>
+        <span className="border border-slate-700 px-2 py-1">NEXT CANDLE EXPIRY: {new Date(unifiedTiming.nextCandleExpiry).toLocaleTimeString()}</span>
+      </div>}
+      <div className="mt-3 grid gap-3 md:grid-cols-2 text-[11px]">
+        <div><p className="font-bold text-emerald-300">Supporting evidence</p><ul className="mt-1 space-y-0.5 font-mono text-slate-400">{unified.supportingEvidence.map((e, i) => <li key={i}>[{e.family}] {e.note} ({e.strength})</li>)}</ul></div>
+        <div><p className="font-bold text-rose-300">Opposing evidence</p><ul className="mt-1 space-y-0.5 font-mono text-slate-400">{unified.opposingEvidence.length === 0 ? <li>none</li> : unified.opposingEvidence.map((e, i) => <li key={i}>[{e.family}] {e.note} ({e.strength})</li>)}</ul></div>
+      </div>
+      {unified.disagreeingFamilies.length > 0 && <p className="mt-2 font-mono text-[11px] text-amber-300">Families in disagreement: {unified.disagreeingFamilies.join(', ')}</p>}
+      {unified.waitReason && <p className="mt-2 border border-amber-400/40 bg-amber-400/10 p-2 text-xs text-amber-200">WAIT reason: {unified.waitReason}</p>}
+    </article>}
     {decision && <article className="mt-5 border-l-2 border-violet-400 bg-slate-900/70 p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-sm font-semibold"><Activity className="h-4 w-4 text-violet-300" />Signal Provider Intelligence — next-candle decision</div>
+        <div className="flex items-center gap-2 text-sm font-semibold"><Activity className="h-4 w-4 text-violet-300" />Signal Provider Intelligence — supplementary family-vote breakdown (subordinate to the authoritative engine)</div>
         <span className="font-mono text-xs text-slate-500">{decision.candlesAnalyzed} completed candles · v{decision.analysisVersion}</span>
       </div>
       <div className="mt-3 grid gap-3 md:grid-cols-4">

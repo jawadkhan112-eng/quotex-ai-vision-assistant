@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Upload, Camera, Eye, Trash2, Image as ImageIcon } from 'lucide-react';
+import { Upload, Camera, Eye, Trash2, Image as ImageIcon, ZoomIn } from 'lucide-react';
 import type { AlgoAnalysisResult } from '../types';
 import { detectChartIdentity } from '../services/chartIdentityService';
 import { safeFetchJson, analyzeFrameViaJpeg } from '../services/safeFetch';
@@ -20,6 +20,16 @@ interface ScreenshotRow {
   reasoning: string | null;
 }
 
+interface ScreenshotSessionInfo {
+  sessionId: string;
+  screenshotId: string;
+  fresh: boolean;
+  freshnessReport: string;
+  identityChanged: boolean;
+  createdAt: string;
+  fingerprint: { width: number; height: number; imageHash: string };
+}
+
 /**
  * Screenshot Lab — upload or drag-drop a chart screenshot, run the same
  * deterministic engine used for live frames, and persist the analysis.
@@ -34,6 +44,8 @@ export const ScreenshotLabView: React.FC = () => {
   const [history, setHistory] = useState<ScreenshotRow[]>([]);
   // Each screenshot keeps its OWN identity — never overwritten by live-screen data.
   const [shotIdentity, setShotIdentity] = useState<ChartIdentity | null>(null);
+  const [session, setSession] = useState<ScreenshotSessionInfo | null>(null);
+  const [zoomed, setZoomed] = useState(false);
 
   const loadHistory = useCallback(async () => {
     try {
@@ -56,10 +68,32 @@ export const ScreenshotLabView: React.FC = () => {
       canvas.width = W; canvas.height = H;
       ctx.drawImage(image, 0, 0, W, H);
       // Independent identity detection on THIS exact screenshot.
+      let identity: ChartIdentity | null = null;
       try {
         const detection = await detectChartIdentity(canvas, image.naturalWidth || canvas.width, image.naturalHeight || canvas.height);
-        setShotIdentity(detection.identity);
+        identity = detection.identity;
+        setShotIdentity(identity);
       } catch { setShotIdentity(null); }
+      // Register a NEW unique screenshot session with freshness validation.
+      const analysisBlob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+      let sessionInfo: ScreenshotSessionInfo | null = null;
+      if (analysisBlob) {
+        try {
+          const sessionRes = await safeFetchJson<{ success: boolean; session?: ScreenshotSessionInfo; error?: string }>('/api/screenshot-session', {
+            method: 'POST', headers: { 'Content-Type': 'image/jpeg' },
+            body: analysisBlob,
+          });
+          if (sessionRes.ok && sessionRes.data?.success && sessionRes.data.session) {
+            sessionInfo = sessionRes.data.session;
+            setSession(sessionInfo);
+            if (!sessionInfo.fresh) {
+              setError(sessionInfo.freshnessReport);
+              setWorking(false);
+              return; // refuse to analyse an unchanged screenshot as fresh
+            }
+          }
+        } catch { /* session optional — analysis continues */ }
+      }
       // JPEG transport (raw bytes, ~100–200KB) — the structural 413 fix.
       const res = await analyzeFrameViaJpeg<{ success: boolean; result?: AlgoAnalysisResult; error?: string }>(canvas, { timeframe: '1M' });
       if (!res.ok || !res.data?.success) throw new Error(res.error ?? 'Screenshot analysis failed.');
@@ -121,7 +155,13 @@ export const ScreenshotLabView: React.FC = () => {
         <div className="mt-4 flex flex-wrap gap-3">
           <label className="flex cursor-pointer items-center gap-2 border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium"><Upload className="h-4 w-4" />Upload screenshot<input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); }} /></label>
           <button onClick={() => void captureCurrentScreen()} className="flex items-center gap-2 border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium"><Camera className="h-4 w-4" />Capture current screen</button>
+          <button onClick={() => setZoomed((z) => !z)} disabled={!preview} className="flex items-center gap-2 border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium disabled:opacity-40"><ZoomIn className="h-4 w-4" />{zoomed ? 'Fit view' : 'Fullscreen / zoom'}</button>
         </div>
+        {zoomed && preview && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-8" onClick={() => setZoomed(false)}>
+            <img src={preview} alt="Screenshot fullscreen" className="max-h-full max-w-full object-contain" />
+          </div>
+        )}
         <canvas ref={canvasRef} className="hidden" />
         {error && <p className="mt-4 border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200">{error}</p>}
       </div>
@@ -130,9 +170,19 @@ export const ScreenshotLabView: React.FC = () => {
         {working && <p className="mt-4 text-sm text-slate-400">Analyzing…</p>}
         {result ? (
           <div className="mt-4 space-y-3">
+            <p className="border border-cyan-400/40 bg-cyan-400/10 px-2 py-1 font-mono text-[11px] font-bold text-cyan-200">SOURCE: SCREENSHOT{session ? ` · ${session.sessionId}` : ''}</p>
+            {session && <p className={`font-mono text-[11px] ${session.fresh ? 'text-emerald-300' : 'text-rose-300'}`}>{session.freshnessReport}{session.identityChanged ? ' · IDENTITY CHANGED — session reset' : ''}</p>}
             <div className={`border p-4 text-center ${result.signal === 'CALL' ? 'border-emerald-400 bg-emerald-400/10 text-emerald-300' : result.signal === 'PUT' ? 'border-rose-400 bg-rose-400/10 text-rose-300' : 'border-amber-400 bg-amber-400/10 text-amber-300'}`}>
               <p className="text-2xl font-black">{result.actionBadge}</p>
               <p className="mt-1 font-mono text-xs">{result.confidenceScore}% confluence · {result.expiry.label}</p>
+            </div>
+            <div className="border border-slate-800 bg-slate-950 p-3 font-mono text-xs">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500">Screenshot analysis metadata</p>
+              <p className="mt-1">SCREENSHOT ID: <span className="font-bold text-slate-100">{session?.screenshotId ?? '—'}</span></p>
+              <p>CAPTURED: <span className="text-slate-100">{session ? new Date(session.createdAt).toLocaleString() : '—'}</span></p>
+              <p>RESOLUTION: <span className="text-slate-100">{session ? `${session.fingerprint.width}×${session.fingerprint.height}` : `${result.reconstructedCandleCount ?? '—'} candles reconstructed`}</span></p>
+              <p>CANDLE COUNT: <span className="text-slate-100">{result.reconstructedCandleCount ?? '—'}</span></p>
+              <p>ANALYSIS COMPLETED: <span className="text-slate-100">{result.analysisTimestamp ? new Date(result.analysisTimestamp).toLocaleString() : '—'}</span></p>
             </div>
             <div className="border border-slate-800 bg-slate-950 p-3 font-mono text-xs">
               <p className="text-[10px] uppercase tracking-wider text-slate-500">Detected identity (this screenshot only)</p>

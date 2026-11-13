@@ -42,7 +42,7 @@ const PAIR_RE = new RegExp(`\\b(${CURRENCIES})\\s*[/\\\\|.,;:-]?\\s*(${CURRENCIE
 const OTC_RE = /\botc\b/i;
 const LIVE_RE = /\b(live|real[- ]?time|real\b)/i;
 
-const TIMEFRAME_RE = /\b(1\s*m(?:in)?|2\s*m(?:in)?|5\s*m(?:in)?|15\s*m(?:in)?|30\s*s(?:ec)?|30\s*m(?:in)?|1\s*h(?:r|our)?|4\s*h(?:r|our)?|s5|m1|m5|m15|h1)\b/i;
+const TIMEFRAME_RE = /\b(1\s*m(?:in)?|2\s*m(?:in)?|3\s*m(?:in)?|4\s*m(?:in)?|5\s*m(?:in)?|15\s*m(?:in)?|30\s*s(?:ec)?|30\s*m(?:in)?|1\s*h(?:r|our)?|4\s*h(?:r|our)?|s5|m1|m2|m3|m4|m5|m15|h1)\b/i;
 
 /** Parses a currency pair from raw OCR text. Returns UNKNOWN when nothing reliable is found. */
 export function parsePairFromText(text: string): DetectedPair {
@@ -73,7 +73,7 @@ export function parseTimeframeFromText(text: string): DetectedTimeframe {
   const match = text.match(TIMEFRAME_RE);
   if (!match) return { timeframe: 'UNKNOWN', confidence: parserFallback() };
   const raw = match[1].replace(/\s+/g, '').toUpperCase();
-  const canonical = raw === '1MIN' ? '1M' : raw === '2MIN' ? '2M' : raw === '5MIN' ? '5M' : raw === '15MIN' ? '15M' : raw === '30MIN' ? '30M' : raw === '1HR' || raw === '1HOUR' ? '1H' : raw === '4HR' || raw === '4HOUR' ? '4H' : raw === '30SEC' ? '30S' : raw;
+  const canonical = raw === '1MIN' ? '1M' : raw === '2MIN' ? '2M' : raw === '3MIN' ? '3M' : raw === '4MIN' ? '4M' : raw === '5MIN' ? '5M' : raw === '15MIN' ? '15M' : raw === '30MIN' ? '30M' : raw === '1HR' || raw === '1HOUR' ? '1H' : raw === '4HR' || raw === '4HOUR' ? '4H' : raw === '30SEC' ? '30S' : /^(M)([1-9])$/.test(raw) ? raw.slice(1) + 'M' : raw;
   // More confidence when the label is short (a lone "1M" button) than in a sentence.
   const shortLabel = match[0].trim().length <= 4;
   const confidence = Math.min(95, 55 + (shortLabel ? 30 : 0));

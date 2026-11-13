@@ -5,6 +5,10 @@ import crypto from 'crypto';
 import { db } from './server/db.js';
 import { analyzeAlgorithmic, reportSignalOutcome, resetMtgState } from './server/algorithmicEngine.js';
 import { analyzeProviderCandles, PROVIDER_ENGINE_VERSION, type ProviderCandle } from './server/modules/signalProviderIntelligence.js';
+import { analyzeUnified, UNIFIED_ENGINE_VERSION, type UnifiedDecision } from './server/unifiedDecisionEngine.js';
+import { createScreenshotSession, hashImageBytes, resetScreenshotSessions, type ScreenshotAnalysisSession } from './server/screenshotSession.js';
+import { reportOutcome, lossGate, snapshotLossState, resetLossManagement, getLossConfig, configureLossManagement } from './server/lossManagement.js';
+import { computeCandleTiming, isSupportedTimeframe } from './server/candleTiming.js';
 import jpegDecode from 'jpeg-js';
 
 dotenv.config();
@@ -99,7 +103,9 @@ app.post('/api/provider-analysis', (req, res) => {
 app.post('/api/decisions', (req, res) => {
   const { decision, meta } = req.body || {};
   if (!decision || !meta) return res.status(400).json({ success: false, error: 'Provide decision and meta.' });
-  const dedupKey = `${meta.asset}|${meta.marketType}|${meta.timeframe}|${meta.targetCandle ?? 'unknown'}|${decision.analysisVersion ?? PROVIDER_ENGINE_VERSION}`;
+  // Dedup includes SOURCE so a screenshot decision can never collide with or
+  // overwrite the live engine's decision for the same asset+timeframe+candle.
+  const dedupKey = `${meta.source ?? 'LIVE'}|${meta.asset}|${meta.marketType}|${meta.timeframe}|${meta.targetCandle ?? 'unknown'}|${decision.analysisVersion ?? PROVIDER_ENGINE_VERSION}`;
   const decisionId = `DEC-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     db.prepare(`INSERT INTO candle_decisions (decision_id, created_at, asset, market_type, timeframe, target_candle, prediction, prediction_confidence, confluence_score, classification, qualified, pattern, trend, explanation, wait_reason, data_quality, candles_analyzed, source, outcome, analysis_version, dedup_key)
@@ -133,6 +139,113 @@ app.post('/api/signal-outcome', (req, res) => {
   res.json({ success: true, local: true });
 });
 app.post('/api/mtg-reset', (_req, res) => { resetMtgState(); res.json({ success: true, local: true }); });
+
+/**
+ * UNIFIED DECISION ENGINE — the ONE authoritative decision per target candle.
+ *
+ * Both source pipelines (LIVE screen-share and SCREENSHOT) call this endpoint
+ * with their own candles + source tag. It runs the SPI engine AND the legacy
+ * algorithmic engine, folds their evidence with correlation control, applies
+ * the loss-management gate (which can only ADD a WAIT, never change direction),
+ * and returns one consistent decision: mainSignal === prediction, always.
+ */
+app.post('/api/unified-decision', (req, res) => {
+  const { completed, developing, window, asset = 'UNKNOWN', marketType = 'UNKNOWN', timeframe = 'UNKNOWN', source = 'LIVE', targetCandle, capturedAt } = req.body || {};
+  if (!Array.isArray(completed) || completed.length < 3) {
+    return res.status(400).json({ success: false, error: 'Provide at least 3 completed candles (open/high/low/close objects).' });
+  }
+  const validCompleted = (completed as ProviderCandle[]).filter((c) =>
+    c && Number.isFinite(c.open) && Number.isFinite(c.high) && Number.isFinite(c.low) && Number.isFinite(c.close));
+  if (validCompleted.length < 3) return res.status(400).json({ success: false, error: 'Completed candles must contain finite open/high/low/close.' });
+  try {
+    // Run both engines on the SAME candle input — deterministic, reproducible.
+    const provider = analyzeProviderCandles({ completed: validCompleted, developing, window: window === 10 ? 10 : 5 });
+    const legacy = analyzeAlgorithmic({
+      prices: validCompleted.map((c) => c.close),
+      candles: validCompleted.map((c) => ({ open: c.open, high: c.high, low: c.low, close: c.close })),
+      timeframe,
+    });
+    const indicatorsAvailable = validCompleted.length >= 15; // RSI/Bollinger actually computable
+    let decision: UnifiedDecision = analyzeUnified({
+      provider, legacy: { signal: legacy.signal, confidenceScore: legacy.confidenceScore, trendFilter: legacy.trendFilter },
+      completed: validCompleted, developing, indicatorsAvailable,
+    });
+
+    // Loss gate: a previous loss can only ADD a WAIT (cooldown/suspension) —
+    // it never flips direction and never lowers/raises confidence.
+    const gate = lossGate();
+    if (gate.blocked && decision.mainSignal !== 'WAIT') {
+      decision = {
+        ...decision,
+        mainSignal: 'WAIT', prediction: 'WAIT', qualified: false,
+        waitReason: `${gate.reason} Chart-evidence direction was ${decision.mainSignal}, withheld by risk management (direction unchanged).`,
+      };
+    }
+
+    // Candle timing for the target candle (only for supported timeframes).
+    const timing = isSupportedTimeframe(timeframe)
+      ? computeCandleTiming(timeframe, capturedAt ? Number(capturedAt) : Date.now())
+      : null;
+
+    res.json({
+      success: true,
+      decision,
+      timing,
+      meta: {
+        asset, marketType, timeframe, source,
+        targetCandle: timing ? timing.nextCandleStart : (targetCandle ?? null),
+        expiry: timing ? timing.nextCandleExpiry : null,
+        analysisVersion: UNIFIED_ENGINE_VERSION,
+      },
+    });
+  } catch (error: any) { res.status(400).json({ success: false, error: error.message || 'Unified decision failed.' }); }
+});
+
+/**
+ * Screenshot session endpoint: registers a freshly captured screenshot, checks
+ * freshness against the previous capture (hash + timestamp), and returns a NEW
+ * unique session. A capture identical to the previous one is reported as
+ * UNCHANGED, never analysed as if fresh.
+ */
+app.post('/api/screenshot-session', express.raw({ type: 'image/jpeg', limit: '2mb' }), (req, res) => {
+  try {
+    if (!req.body || !Buffer.isBuffer(req.body) || req.body.length < 100) {
+      return res.status(400).json({ success: false, error: 'Expected a raw image/jpeg body.' });
+    }
+    const width = Number(req.query.width), height = Number(req.query.height);
+    const candleCount = Number(req.query.candles ?? 0);
+    const identity = req.query.identity ? JSON.parse(String(req.query.identity)) : null;
+    const session: ScreenshotAnalysisSession = createScreenshotSession({
+      imageHash: hashImageBytes(req.body),
+      capturedAt: Date.now(),
+      width: Number.isFinite(width) ? width : 0,
+      height: Number.isFinite(height) ? height : 0,
+      candleCount: Number.isFinite(candleCount) ? candleCount : 0,
+      identity,
+    });
+    res.json({ success: true, session });
+  } catch (error: any) { res.status(400).json({ success: false, error: error.message || 'Screenshot session failed.' }); }
+});
+app.post('/api/screenshot-session/reset', (_req, res) => { resetScreenshotSessions(); res.json({ success: true }); });
+
+// ---- Loss management: WIN/LOSS reporting, cooldown, limits ----
+app.post('/api/loss-management/outcome', (req, res) => {
+  const { outcome, direction } = req.body || {};
+  if (outcome !== 'WIN' && outcome !== 'LOSS') return res.status(400).json({ success: false, error: "outcome must be 'WIN' or 'LOSS'." });
+  const state = reportOutcome({ outcome, direction: String(direction ?? 'UNKNOWN') });
+  res.json({ success: true, state, config: getLossConfig(), local: true });
+});
+app.get('/api/loss-management', (_req, res) => res.json({ success: true, state: snapshotLossState(), config: getLossConfig(), gate: lossGate(), local: true }));
+app.post('/api/loss-management/reset', (_req, res) => { resetLossManagement(); res.json({ success: true, state: snapshotLossState(), local: true }); });
+app.post('/api/loss-management/config', (req, res) => {
+  const { cooldownAfterLosses, cooldownDurationMs, maxTotalLosses } = req.body || {};
+  configureLossManagement({
+    cooldownAfterLosses: Number.isFinite(Number(cooldownAfterLosses)) ? Math.max(1, Number(cooldownAfterLosses)) : undefined,
+    cooldownDurationMs: Number.isFinite(Number(cooldownDurationMs)) ? Math.max(0, Number(cooldownDurationMs)) : undefined,
+    maxTotalLosses: Number.isFinite(Number(maxTotalLosses)) ? Math.max(1, Number(maxTotalLosses)) : undefined,
+  });
+  res.json({ success: true, config: getLossConfig(), local: true });
+});
 
 // ---- MTG (Martingale) persistent recovery chains ----
 // A chain records the original signal (level 0) and up to two visually verified
